@@ -24,8 +24,8 @@ namespace Ro3Emu.Server.Game;
 public sealed partial class MonsterService
 {
     private BossSkillSets? _bossSkillSets;
-    internal BossSkillSets BossSkillSets => _bossSkillSets ??= new BossSkillSets(data, bossOptions);
-    internal BossSkillOptions BossOptions => bossOptions;
+    internal BossSkillSets BossSkillSets => _bossSkillSets ??= new BossSkillSets(_data, _bossOptions);
+    internal BossSkillOptions BossOptions => _bossOptions;
 
     /// <summary>Set by CombatService: carry out a chosen special (boss, its player or tower-pet target, skill, cast serial).</summary>
     public Func<MonsterUnit, GameSession?, TowerPetUnit?, BossSkill, long, Task>? CastBossSkill { get; set; }
@@ -35,7 +35,7 @@ public sealed partial class MonsterService
 
     /// <summary>Only bosses (NPCConfig subtype 3 mini, 4 MVP, 6 boss) get special skills, and only from their data.</summary>
     private BossSkillBook? BossBook(int npcId, JsonElement npc, int normalSkill) =>
-        bossOptions.Enabled && GameData.Int(npc, "_iNPCSubType") is 3 or 4 or 6 ? BossSkillSets.For(npcId, normalSkill) : null;
+        _bossOptions.Enabled && GameData.Int(npc, "_iNPCSubType") is 3 or 4 or 6 ? BossSkillSets.For(npcId, normalSkill) : null;
 
     /// <summary>MvpService's tick: its own plans were not due, so the boss may cast one of its generic specials.</summary>
     internal bool TryBossSkill(MonsterUnit m, long now) =>
@@ -49,7 +49,7 @@ public sealed partial class MonsterService
         if (!rt.Engaged)
         {
             rt.Engaged = true;
-            long first = now + bossOptions.FirstCastDelayMs;
+            long first = now + _bossOptions.FirstCastDelayMs;
             for (int i = 0; i < book.Skills.Length; i++) rt.ReadyMs[i] = book.Skills[i].Once && book.Skills[i].FromPhase > 0 ? long.MaxValue : first;
         }
         int phase = book.PhaseAt(m.Hp, m.Template.MaxHp);
@@ -113,7 +113,7 @@ public sealed partial class MonsterService
         }
         long busy = skill.BusyMs + skill.ChargeMs;
         m.BusyUntilMs = now + busy;
-        m.NextSpecialMs = now + Math.Max(busy + bossOptions.GlobalCooldownMs, skill.PublicCdMs);
+        m.NextSpecialMs = now + Math.Max(busy + _bossOptions.GlobalCooldownMs, skill.PublicCdMs);
         m.NextSwingMs = Math.Max(m.NextSwingMs, m.BusyUntilMs);
         if (player != null) m.Face = Angle(m.X, m.Z, player.Position.X, player.Position.Z);
         else if (pet != null) m.Face = Angle(m.X, m.Z, pet.X, pet.Z);
@@ -127,13 +127,13 @@ public sealed partial class MonsterService
             SendStop(m, now);
         }
         var cast = CastBossSkill!;
-        loop.TrackRuntimeDetached("boss skill", () => cast(m, player, pet, skill, serial));
+        _loop.TrackRuntimeDetached("boss skill", () => cast(m, player, pet, skill, serial));
     }
 
     /// <summary>Leaving combat or death: cooldowns and phase start over; the cast in flight and the summons end.</summary>
     private void EndBossSkills(MonsterUnit m, bool interrupt)
     {
-        if (EndBossSkillsTask(m, interrupt) is { } end) loop.TrackRuntimeDetached("boss skills end", () => end);
+        if (EndBossSkillsTask(m, interrupt) is { } end) _loop.TrackRuntimeDetached("boss skills end", () => end);
     }
 
     /// <summary>The ending work, or null when there is none. A boss leaving the world awaits it: its summons must be gone
@@ -159,52 +159,52 @@ public sealed partial class MonsterService
         switch (op)
         {
             case "spawn":
-            {
-                int npc = int.Parse(args[1], CultureInfo.InvariantCulture);
-                if (Template(npc) is not { } template) return $"NPC {npc} is not a monster.";
-                double angle = s.Face * Math.PI / 180;
-                var at = new MapPoint(s.Position.X + (float)Math.Sin(angle) * 4, s.Position.Y, s.Position.Z + (float)Math.Cos(angle) * 4, s.Face + 180);
-                if (await SpawnSingleAsync(s.RuntimeMap, npc, at) is not { } boss) return $"Could not spawn {npc} here.";
-                Engage(boss, s);
-                return $"Spawned {NpcName(npc)} ({npc}, uid {boss.Uid}) with {template.Skills?.Skills.Length ?? 0} special skill(s); it attacks you.";
-            }
-            case "skills":
-            {
-                if (args.Length > 1)
                 {
                     int npc = int.Parse(args[1], CultureInfo.InvariantCulture);
-                    return Template(npc) is { } t ? Describe(npc, t.Skills, null, NowMs) : $"NPC {npc} is not a monster.";
+                    if (Template(npc) is not { } template) return $"NPC {npc} is not a monster.";
+                    double angle = s.Face * Math.PI / 180;
+                    var at = new MapPoint(s.Position.X + (float)Math.Sin(angle) * 4, s.Position.Y, s.Position.Z + (float)Math.Cos(angle) * 4, s.Face + 180);
+                    if (await SpawnSingleAsync(s.RuntimeMap, npc, at) is not { } boss) return $"Could not spawn {npc} here.";
+                    Engage(boss, s);
+                    return $"Spawned {NpcName(npc)} ({npc}, uid {boss.Uid}) with {template.Skills?.Skills.Length ?? 0} special skill(s); it attacks you.";
                 }
-                return NearestBoss(s) is { } boss ? Describe(boss.Template.NpcId, boss.Template.Skills, boss, NowMs) : "No boss with special skills near you.";
-            }
+            case "skills":
+                {
+                    if (args.Length > 1)
+                    {
+                        int npc = int.Parse(args[1], CultureInfo.InvariantCulture);
+                        return Template(npc) is { } t ? Describe(npc, t.Skills, null, NowMs) : $"NPC {npc} is not a monster.";
+                    }
+                    return NearestBoss(s) is { } boss ? Describe(boss.Template.NpcId, boss.Template.Skills, boss, NowMs) : "No boss with special skills near you.";
+                }
             case "phase":
-            {
-                if (NearestBoss(s) is not { Template.Skills: { } book } boss) return "No boss with special skills near you.";
-                int phase = int.Parse(args[1], CultureInfo.InvariantCulture);
-                if (phase < 1 || phase > book.PhaseHpBp.Length) return $"{NpcName(boss.Template.NpcId)} has phases 0..{book.Phases - 1}.";
-                boss.Hp = Math.Max(1, boss.Template.MaxHp * book.PhaseHpBp[phase - 1] / 10000 - 1);
-                SendHealth(boss);
-                if (boss.Target == null) Engage(boss, s);
-                return $"{NpcName(boss.Template.NpcId)} HP set to {boss.Hp}/{boss.Template.MaxHp}: phase {phase} begins.";
-            }
+                {
+                    if (NearestBoss(s) is not { Template.Skills: { } book } boss) return "No boss with special skills near you.";
+                    int phase = int.Parse(args[1], CultureInfo.InvariantCulture);
+                    if (phase < 1 || phase > book.PhaseHpBp.Length) return $"{NpcName(boss.Template.NpcId)} has phases 0..{book.Phases - 1}.";
+                    boss.Hp = Math.Max(1, boss.Template.MaxHp * book.PhaseHpBp[phase - 1] / 10000 - 1);
+                    SendHealth(boss);
+                    if (boss.Target == null) Engage(boss, s);
+                    return $"{NpcName(boss.Template.NpcId)} HP set to {boss.Hp}/{boss.Template.MaxHp}: phase {phase} begins.";
+                }
             case "cast":
-            {
-                if (NearestBoss(s) is not { Template.Skills: { } book } boss) return "No boss with special skills near you.";
-                int id = int.Parse(args[1], CultureInfo.InvariantCulture);
-                int index = Array.FindIndex(book.Skills, k => k.Id == id);
-                if (index < 0) return $"Skill {id} is not in {NpcName(boss.Template.NpcId)}'s set.";
-                if (boss.Target != s) Engage(boss, s);
-                var rt = boss.BossSkills ??= new BossSkillRuntime(book);
-                rt.Engaged = true;
-                StartBossSkill(boss, s, null, rt, index, NowMs);
-                return $"{NpcName(boss.Template.NpcId)} casts {data.TextOf(book.Skills[index].Row, "_iName")} ({id}).";
-            }
+                {
+                    if (NearestBoss(s) is not { Template.Skills: { } book } boss) return "No boss with special skills near you.";
+                    int id = int.Parse(args[1], CultureInfo.InvariantCulture);
+                    int index = Array.FindIndex(book.Skills, k => k.Id == id);
+                    if (index < 0) return $"Skill {id} is not in {NpcName(boss.Template.NpcId)}'s set.";
+                    if (boss.Target != s) Engage(boss, s);
+                    var rt = boss.BossSkills ??= new BossSkillRuntime(book);
+                    rt.Engaged = true;
+                    StartBossSkill(boss, s, null, rt, index, NowMs);
+                    return $"{NpcName(boss.Template.NpcId)} casts {_data.TextOf(book.Skills[index].Row, "_iName")} ({id}).";
+                }
             case "kill":
-            {
-                if (NearestBoss(s, anyMonster: true) is not { } boss) return "No monster near you.";
-                await KillAsync(boss);
-                return $"{NpcName(boss.Template.NpcId)} removed (no rewards).";
-            }
+                {
+                    if (NearestBoss(s, anyMonster: true) is not { } boss) return "No monster near you.";
+                    await KillAsync(boss);
+                    return $"{NpcName(boss.Template.NpcId)} removed (no rewards).";
+                }
             default: throw new ArgumentException("op");
         }
     }
@@ -213,7 +213,7 @@ public sealed partial class MonsterService
     {
         MonsterUnit? best = null;
         float bestDistance = 40f;
-        foreach (var unit in world.Map(s.WorldScene).Units)
+        foreach (var unit in _world.Map(s.WorldScene).Units)
             if (unit is MonsterUnit m && !m.Dead && (anyMonster || m.Template.Skills != null) && Distance(m, s) is var d && d < bestDistance)
             {
                 best = m;
@@ -222,7 +222,7 @@ public sealed partial class MonsterService
         return best;
     }
 
-    private string NpcName(int npc) => data.Row("NPCConfig", npc) is { } row ? data.TextOf(row, "_kName") : npc.ToString(CultureInfo.InvariantCulture);
+    private string NpcName(int npc) => _data.Row("NPCConfig", npc) is { } row ? _data.TextOf(row, "_kName") : npc.ToString(CultureInfo.InvariantCulture);
 
     private string Describe(int npc, BossSkillBook? book, MonsterUnit? live, long now)
     {
@@ -236,7 +236,7 @@ public sealed partial class MonsterService
         {
             var k = book.Skills[i];
             text.Append('\n').Append(CultureInfo.InvariantCulture,
-                $"{k.Id} {data.TextOf(k.Row, "_iName")} [{k.Logic}] cd {k.CdMs / 1000.0:0.#}s cast {k.BusyMs / 1000.0:0.#}s {k.Area} {k.Radius:0.#}m");
+                $"{k.Id} {_data.TextOf(k.Row, "_iName")} [{k.Logic}] cd {k.CdMs / 1000.0:0.#}s cast {k.BusyMs / 1000.0:0.#}s {k.Area} {k.Radius:0.#}m");
             if (k.FromPhase > 0 || k.ToPhase != int.MaxValue)
                 text.Append(CultureInfo.InvariantCulture, $" phase {k.FromPhase}{(k.ToPhase == int.MaxValue ? "+" : k.ToPhase > k.FromPhase ? "-" + k.ToPhase : "")}");
             if (k.Once) text.Append(" once");
