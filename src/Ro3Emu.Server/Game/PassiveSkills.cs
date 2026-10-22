@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Romsg;
 using Ro3Emu.Server.Data;
 using Ro3Emu.Server.Data.Config;
@@ -11,16 +12,24 @@ namespace Ro3Emu.Server.Game;
 /// The learned passives that act on events rather than stand as attributes (those are CombatService.Passives). Each reads
 /// its own BuffConfig row (CombatService.OwnBuffs) and its description values, quoted per passive. The trigger is written
 /// only in the description, as for the talents' procs (inferred). Double Attack, Deadly Poison's Venom and Advanced Katar
-/// Mastery are in TalentProcs.Passives, next to the talents that change them. Not executed: Union (its stacks count
-/// Crusaders on the team), the mount passives (Riding, Dragon Training, Wolf Taming, Wolf's Fang), Sight Sprout's
-/// detection, Psychokinetic Astral Body, Supersonic Blow, Element Control's Boss resistance hit and Arcane Mastery's
-/// Turn Undead bonus.
+/// Mastery are in TalentProcs.Passives, next to the talents that change them; Supersonic Blow and Arcane Mastery change a
+/// skill's damage in CombatService.Passives; the mount passives (Riding, Dragon Training, Wolf Taming, Wolf's Fang) are
+/// RidingEffects. Not executed: Sight Sprout's detection.
 /// </summary>
-public sealed class PassiveSkills
+public sealed class PassiveSkills : IGameTicker
 {
     private const int DoubleHolyLight = 14311, Judex = 14309, EnchantBlade = 11313, EnergyCoat = 12003,
         EmergencyTreatment = 16303, SoulDrain = 12209, PreyOnTheWeak = 15316, PrayerOfGratitude = 14306,
-        WoodSpiritsBlessing = 14307;
+        WoodSpiritsBlessing = 14307, Union = 11614, SoulExpansion = 12302, PsychokineticAstralBody = 12343, ElementControl = 12306;
+    // Element Control: "When a Boss target resists your [Frozen], [Petrify], or [Stun], respectively deals Water/Earth/Wind
+    // Ranged Magic damage equal to your MATK * ${2}% to the target." The control's BuffConfig category (Frozen 9, Petrify
+    // 10, Stun 13) picks the Warlock's Ice Blast 1235301, Earth Blast 1235501 or Thunder Blast 1235401 row: water, earth
+    // and wind, each _kDamageParam1 10800 (the ${2} 108).
+    private static readonly Dictionary<long, int> ElementControlBlasts = new() { [9] = 1235301, [10] = 1235501, [13] = 1235401 };
+    // Psychokinetic Astral Body's description links its bodies to BuffConfig 12361 (the row of its level).
+    private const int AstralBodyBuff = 12361;
+    private const int UnionBuff = 1162701; // BuffConfig "Union": "Each stack increases your Physical ATK, ..." (_iMaxStack 10)
+    private const long Crusader = 1210; // JobConfig: the Crusader line (Paladin 1310, Royal Guard 1410) descends from it
     private const int AttrMaxSp = 102; // CharacterService stats: 101 Max HP, 102 Max SP, 2000 HP, 2001 SP
     private const int AttrMaxHp = 101, AttrHp = 2000, AttrSp = 2001;
     // "Permanent" for the Prayer of Gratitude shield: a day, renewed on every scene load (inferred).
@@ -31,34 +40,49 @@ public sealed class PassiveSkills
     private readonly BuffService _buffs;
     private readonly CharacterService _character;
     private readonly GameLoop _loop;
+    private readonly SessionRegistry _sessions;
+    private readonly TeamService _teams;
     private readonly ConditionalWeakTable<GameSession, State> _states = [];
 
     private sealed class State
     {
         public readonly Dictionary<int, long> ReadyAt = [];
         public long LastHitMs;
+        public long NextAstralMs;
     }
 
     // A test can fix each ten-thousandth roll without changing the production probability.
     internal Func<int, int> Roll { get; set; } = bound => Random.Shared.Next(bound);
+    private TimeSpan _lastTick;
 
     public PassiveSkills(GameData data, CombatService combat, BuffService buffs, CharacterService character, SceneService scenes,
-        SkillService skills, GameLoop loop)
+        SkillService skills, GameLoop loop, SessionRegistry sessions, TeamService teams)
     {
+        _sessions = sessions;
+        _teams = teams;
         _data = data;
         _combat = combat;
         _buffs = buffs;
         _character = character;
         _loop = loop;
         combat.CastResolved.Add(OnCastResolvedAsync);
+        buffs.ControlResisted.Add(OnControlResistedAsync);
         combat.TakenAsync.Add(OnTakenAsync);
         combat.Killed.Add(OnKilledAsync);
         combat.DamageAdjusters.Add(PreyOnTheWeakDamage);
         buffs.PassiveLethalSave = WoodSpiritsBlessingAsync;
         // It touches only the loaded session's own buffs, inside the scene load's scope: no hook scope of its own.
-        scenes.AddOwnedAfterLoaded(PrayerShieldAsync);
-        skills.Learned.Add(PrayerShieldAsync);
-        character.JobChanged.Add(PrayerShieldAsync);
+        scenes.AddOwnedAfterLoaded(StandingBuffsAsync);
+        skills.Learned.Add(StandingBuffsAsync);
+        character.JobChanged.Add(StandingBuffsAsync);
+        // A roster or member card change runs in the party's scope; each member's Union is set in a work item of its own.
+        teams.RosterChanged.Add(roles =>
+        {
+            foreach (long role in roles)
+                if (_sessions.All().FirstOrDefault(p => p.Role?.Id == role) is { } member)
+                    loop.PostLegacy(() => UnionAsync(member), "union stacks");
+            return Task.CompletedTask;
+        });
     }
 
     private (SkillConfig Skill, BuffConfig? Own)? Learned(GameSession s, int group) =>
@@ -92,6 +116,65 @@ public sealed class PassiveSkills
         // whose _iTime is those seconds].
         if (hit.Dsts.Any(d => d.Damage > 0) && Learned(s, EnchantBlade) is { Own: { LogicData: [var defense, ..] } })
             await _buffs.AddAsync(s, (int)defense, 0, s.Role.Id);
+        // Psychokinetic Astral Body: "If you already have ${4} [Psychokinetic Astral Bodies], hitting with Soul Expansion
+        // Launches all [Psychokinetic Astral Bodies]. Each Deals Ghost Ranged Magic DMG equal to MATK * ${5}% to the target
+        // enemy." Each casts the row the bodies' buff's _kLogicData[0] names (12345 Singularity of its level), in the
+        // caster's mode.
+        if (cast.SkillId == SoulExpansion && hit.Dsts.Any(d => d.Damage > 0) && AstralBodies(s) is { } bodies
+            && s.Buffs.FirstOrDefault(b => b.ConfigId == bodies.Buff && b.ExpireMs > MonsterService.NowMs) is { } live
+            && live.PileCount >= bodies.Launch && BuffConfig.Get(_data, bodies.Buff) is { LogicData: [var launch, ..] }
+            && (_combat.EffectiveSkillRow(s, (int)launch) ?? SkillConfig.Get(_data, launch)?.Row) is { } body)
+        {
+            await _buffs.RemoveAsync(s, live);
+            for (int i = 0; i < live.PileCount && target.Hp > 0; i++) await _combat.CastExtraAsync(s, body, [target]);
+        }
+    }
+
+    private async Task OnControlResistedAsync(WorldUnit unit, long sourceId, JsonElement control)
+    {
+        if (unit is not MonsterUnit monster || monster.Hp <= 0
+            || _sessions.All().FirstOrDefault(p => p.Role?.Id == sourceId) is not { Dead: false } s
+            || Learned(s, ElementControl) is null) return;
+        foreach (long category in new BuffConfig(control).BuffCategory)
+            if (ElementControlBlasts.TryGetValue(category, out int blast) && SkillConfig.Get(_data, blast) is { } row)
+            {
+                await _combat.CastExtraAsync(s, row.Row, [monster]);
+                return;
+            }
+    }
+
+    /// <summary>Psychokinetic Astral Body's bodies buff row and its numbers: "Auto-generating ${2} [Psychokinetic Astral
+    /// Bodies] every ${1} seconds, up to ${3}. If you already have ${4} ..." The passive's mode row (a talent's type 15)
+    /// carries its faster ${1}.</summary>
+    private (int Buff, long EveryMs, int Count, int Max, int Launch)? AstralBodies(GameSession s)
+    {
+        if (Learned(s, PsychokineticAstralBody) is not { Skill: var learned }) return null;
+        var desc = (_combat.EffectiveSkillRow(s, (int)learned.Id) is { } row ? new SkillConfig(row) : learned).DescData;
+        return ((int)(AstralBodyBuff * 100L + learned.Level), (long)(Value(desc, 0) * 1000), (int)Value(desc, 1),
+            (int)Value(desc, 2), (int)Value(desc, 3));
+    }
+
+    /// <summary>Psychokinetic Astral Body generates its bodies every ${1} seconds, in and out of combat (inferred).</summary>
+    public void Tick(GameTime time)
+    {
+        if (time.Now - _lastTick < TimeSpan.FromMilliseconds(100)) return;
+        _lastTick = time.Now;
+        long now = MonsterService.NowMs;
+        foreach (var s in _sessions.All())
+        {
+            if (s.Role is not { } role || s.Dead || s.SceneLoading || AstralBodies(s) is not { EveryMs: > 0 } bodies) continue;
+            var state = _states.GetOrCreateValue(s);
+            if (state.NextAstralMs == 0) state.NextAstralMs = now + bodies.EveryMs;
+            if (now < state.NextAstralMs) continue;
+            // Keep the cadence: a body on time counts from when it was due, not from this tick.
+            state.NextAstralMs = (now - state.NextAstralMs < 100 ? state.NextAstralMs : now) + bodies.EveryMs;
+            _loop.PostOwned(s, async () =>
+            {
+                int held = s.Buffs.FirstOrDefault(b => b.ConfigId == bodies.Buff && b.ExpireMs > MonsterService.NowMs)?.PileCount ?? 0;
+                if (held < bodies.Max && !s.Dead)
+                    await _buffs.SetPileCountAsync(s, bodies.Buff, PermanentMs, role.Id, Math.Min(bodies.Max, held + bodies.Count));
+            }, "astral bodies");
+        }
     }
 
     private async Task OnTakenAsync(MonsterUnit attacker, GameSession s, long damage)
@@ -127,6 +210,39 @@ public sealed class PassiveSkills
                     await PrayerShieldAsync(s);
             });
         }
+    }
+
+    private async Task StandingBuffsAsync(GameSession s)
+    {
+        await PrayerShieldAsync(s);
+        await UnionAsync(s);
+    }
+
+    /// <summary>
+    /// Union: "Join forces with other Crusaders on your team. For each Crusader on the team, gain 1 stack of [Union]:
+    /// Physical ATK, Physical DEF, and Magic DEF increase by ${1}. Stacks up to ${2} times." The other online members of the
+    /// Crusader line count (inferred), as piles of the Union buff, which leaves with the last of them or the passive.
+    /// </summary>
+    private async Task UnionAsync(GameSession s)
+    {
+        if (s.Role is not { } role || s.Dead) return;
+        int stacks = 0;
+        if (Learned(s, Union) is { Skill: var union })
+            stacks = Math.Min((int)Value(union.DescData, 1), _teams.MembersOf(role.Id).Count(id => id != role.Id
+                && _sessions.All().FirstOrDefault(p => p.Role?.Id == id) is { Progress: { } progress } && IsCrusader(progress.Career)));
+        var live = s.Buffs.FirstOrDefault(b => b.ConfigId == UnionBuff && b.ExpireMs > MonsterService.NowMs);
+        if (stacks > 0 && live?.PileCount != stacks) await _buffs.SetPileCountAsync(s, UnionBuff, PermanentMs, role.Id, stacks);
+        else if (stacks == 0 && live != null) await _buffs.RemoveAsync(s, live);
+    }
+
+    private bool IsCrusader(long career)
+    {
+        for (int guard = 0; career > 0 && guard < 8; guard++)
+        {
+            if (career == Crusader) return true;
+            career = JobConfig.Get(_data, career)?.ParentId ?? 0;
+        }
+        return false;
     }
 
     /// <summary>Prayer of Gratitude: "... plus a shield equal to Max Life * ${4}%." Its own row is "Gain a permanent
