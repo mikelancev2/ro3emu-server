@@ -304,6 +304,13 @@ public sealed partial class CombatService : IGameTicker
         return 1000002;
     }
 
+    /// <summary>
+    /// SkillHitInfo.split: how many damage words the client shows for one hit. The client reads SkillConfig._kShowDmg
+    /// per show attack point; when absent, one word is the client's fallback. A cast resolves at its first attack
+    /// point, so the first count applies (inferred for skills with several points).
+    /// </summary>
+    private static int HitSplit(JsonElement row) => Math.Max(1, (int)Numbers(row, "_kShowDmg").FirstOrDefault(1));
+
     // ---- monsters hitting players ----
 
     /// <summary>
