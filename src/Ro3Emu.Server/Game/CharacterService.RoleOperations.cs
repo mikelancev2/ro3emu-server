@@ -298,6 +298,7 @@ public sealed partial class CharacterService
             if (req.ItemGuid != 0) list.Add(new ShortcutBarInfo { SlotIndex = req.SlotIndex, ItemGuid = req.ItemGuid });
             await CommitBagAsync(session, "bag-setting", next);
         }
+        log.LogInformation("{Name} shortcut save slot {Slot} guid {Guid}: result {Result}", session.Role?.Name, req.SlotIndex, req.ItemGuid, result);
         await session.SendGameAsync(ShortcutBarSave, new ShortcutBarSaveRes { Result = result });
         if (result == 0) await SyncItemsAsync(session);
     }

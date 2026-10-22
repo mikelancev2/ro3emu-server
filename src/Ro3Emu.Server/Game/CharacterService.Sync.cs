@@ -98,8 +98,21 @@ public sealed partial class CharacterService
         var info = new DBItemsInfo { AutoDecomposeSetting = session.AutoDecompose.Clone() };
         var preferences = session.BagState.Info;
         info.QuickUseInfos.Add(preferences.QuickUseInfos);
-        info.ShortcutBarInfos.Add(preferences.ShortcutBarInfos);
-        info.MedicinesAutoUse = preferences.MedicinesAutoUse?.Clone();
+        // The client's incremental shortcutBarInfos update only replaces an entry it already has at that slot
+        // index (LC_DAL_Item.OnShortcutBarInfosUpdate skips a slot with no prior entry); a slot that was never
+        // filled has no entry at all, so the first item ever dropped there doesn't render until an unrelated
+        // full refresh happens. Sending every slot (empty ones as ItemGuid 0) keeps the client's array pre-seeded.
+        var filled = preferences.ShortcutBarInfos.ToDictionary(i => i.SlotIndex);
+        for (int slot = 0; slot < ShortcutSlotLimit; slot++)
+            info.ShortcutBarInfos.Add(filled.TryGetValue(slot, out var existing) ? existing
+                : new ShortcutBarInfo { SlotIndex = slot, ItemGuid = 0 });
+        // A character that never opened the auto-drink panel has no HpConfig/SpConfig; the client reads Condition
+        // on open regardless of IsOpen and crashes on the nil (the same absent-field hazard PackInfo guards against).
+        info.MedicinesAutoUse = preferences.MedicinesAutoUse?.Clone() ?? new MedicinesAutoUseSet
+        {
+            HpConfig = new MedicinesAutoUse { Condition = 50 },
+            SpConfig = new MedicinesAutoUse { Condition = 50 },
+        };
         info.CurrentArrowID = preferences.CurrentArrowID;
         info.ItemCds = preferences.ItemCds?.Clone();
         info.ShareCds = preferences.ShareCds?.Clone();

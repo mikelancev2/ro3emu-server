@@ -108,11 +108,16 @@ public sealed partial class CombatService
             return;
         }
         if (lease?.Cancelled == true || !ReferenceEquals(s.Attachment, lease) ||
-            s.SceneGeneration != scene || s.WorldScene != worldScene || s.SceneLoading) return;
+            s.SceneGeneration != scene || s.WorldScene != worldScene || s.SceneLoading)
+        {
+            _log.LogInformation("{Name} skill {Skill} dropped: attachment/scene changed during cost admission", s.Role?.Name, req.SkillId);
+            return;
+        }
         await CancelCastAsync(s, SkillInterruptedInfo.Types.SkillInterruptType.Skill);
         _eventAttacks.Remove(s);
         await PayCostsAsync(s, costs);
         await _buffs.SpendEnergyAsync(s, row!.Value);
+        _log.LogInformation("{Name} casts skill {Skill} ({Script})", s.Role?.Name, req.SkillId, Script(row!.Value));
         await s.SendGameAsync(UseSkill, new CastSkillRsp { SessionId = id, IsAutoCast = req.IsAutoCast });
         var target = FindMonster(s.WorldScene, req.TargetId);
         var playerTarget = EventTarget(s, req.TargetId);
@@ -160,6 +165,7 @@ public sealed partial class CombatService
     // Refusal must not interrupt a different accepted cast: the client does not compare 31103.sessionId.
     private async Task RefuseCoreAsync(GameSession s, CastSkillReq req, int error, long parameter)
     {
+        _log.LogInformation("{Name} skill {Skill} refused: {Error} ({Parameter})", s.Role?.Name, req.SkillId, error, parameter);
         var reply = new CastSkillRsp { Result = error, IsAutoCast = req.IsAutoCast };
         if (parameter != 0) reply.Params.Add(parameter);
         await s.SendGameAsync(UseSkill, reply);

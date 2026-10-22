@@ -318,6 +318,8 @@ public sealed partial class CombatService
             ["WolvesDash"] = (DisplaceKind.CasterForward, 0),
             ["HighspeedSlide"] = (DisplaceKind.CasterForward, 0),
             ["HighspeedSlideMecha"] = (DisplaceKind.CasterForward, 0),
+            ["EatChicken_1003"] = (DisplaceKind.CasterForward, 0), // Soul Destroyer (151003)'s script key, despite the name
+            ["yingliu"] = (DisplaceKind.CasterForward, 0), // Flowing Shadow (15421): "Advances 7m as a phantom"
             ["PinpointAttack"] = (DisplaceKind.CasterForward, 3),
             ["ArrowRepel"] = (DisplaceKind.TargetPush, 3),
             ["PileBunker"] = (DisplaceKind.TargetPush, 5),
