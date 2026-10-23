@@ -130,6 +130,9 @@ public sealed class PassPlayTests : IAsyncLifetime
         long expected = (60 * 6 + (challenge ? 300 : 0)) * 2;
         await Gm(alice, "!item 5 60"); // 60 daily activity points
         await Until(async () => await Currency(alice, NewActivityService.PassExpCurrency) >= expected, "pass EXP from daily activity");
+        // The currency and the pass's own Level/Exp are reconciled separately on the game loop; the currency can
+        // land first, so wait for the pass view to catch up too before comparing it.
+        await Until(async () => (await Pass(alice)).Level * 2000L + (await Pass(alice)).Exp >= expected, "pass level/exp from daily activity");
         var play = await Play(alice);
         Assert.Equal(60, play.WeeklyProgress["w.activity"]);
         Assert.Equal(expected, await Currency(alice, NewActivityService.PassExpCurrency));
