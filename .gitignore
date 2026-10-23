@@ -28,5 +28,8 @@ tools/unluac-batch/*.class
 /RO3Emu.settings.json
 /RO3Emu-diagnostics.zip
 
+# Local website artwork extracted from the game client; provision separately.
+/chronicles-site/assets/client/
+
 # Temporary solution of tools/AnalyzerBaseline
 /.analyzer-baseline.slnx

@@ -225,6 +225,7 @@ public static class ServerHost
             await next();
         });
         SdkEndpoints.Map(app);
+        AccountEndpoints.Map(app);
         Diagnostics.MetricsEndpoints.Map(app);
         // Run a GM command as an online player (loopback only): POST /ro3emu/gm?account=tester body "!warp 10111 150 190".
         app.MapPost("/ro3emu/gm", async (HttpContext context, SessionRegistry sessions, GmCommands gm, GameLoop loop) =>

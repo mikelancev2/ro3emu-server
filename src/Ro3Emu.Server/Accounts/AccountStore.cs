@@ -478,6 +478,11 @@ public sealed partial class AccountStore : IDisposable
     }
     public async Task<bool> VerifyAsync(string name, string password) => await VerifiedAccountAsync(name, password).ConfigureAwait(false) != null;
 
+    /// <summary>True when an account already uses this name (letter case ignored, same rule as login/registration).
+    /// No password check, no hashing: for a "is this name taken" check before the player commits to a password.</summary>
+    public async Task<bool> NameExistsAsync(string name) =>
+        await ReadAsync<AccountCredentials?>(new AccountCredentialsRead(name)).ConfigureAwait(false) != null;
+
     /// <summary>The account's stored name when the password matches, else null.</summary>
     public async Task<string?> VerifiedAccountAsync(string name, string password)
     {
