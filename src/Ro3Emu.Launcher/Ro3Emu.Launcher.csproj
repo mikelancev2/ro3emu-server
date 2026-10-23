@@ -7,10 +7,13 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <AssemblyName>Ro3EmuLauncher</AssemblyName>
+    <AssemblyName>Launcher Chronicles</AssemblyName>
     <RootNamespace>Ro3Emu.Launcher</RootNamespace>
     <Version>1.0.1</Version>
-    <Product>RO3Emu Launcher</Product>
+    <Product>Chronicles Launcher</Product>
+    <AssemblyTitle>Chronicles</AssemblyTitle>
+    <Description>Chronicles Launcher</Description>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- Release: one self-contained exe, players need no .NET install. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

@@ -38,7 +38,17 @@ public sealed class LauncherController : IDisposable
         _pickFolder = pickFolder;
         _minimize = minimize;
         _repo = new RepositoryClient(new Uri(config.Repository));
-        _layout = new InstallLayout(_settings.ClientDirectory ?? Path.Combine(Path.GetDirectoryName(exePath)!, "Client"));
+        _layout = new InstallLayout(_settings.ClientDirectory ?? DefaultGameDirectory());
+    }
+
+    /// <summary>
+    /// A fixed, predictable install location (not "next to wherever the player happened to save the exe", which
+    /// varies with the browser's download folder): &lt;system drive&gt;:\Games\&lt;ServerName&gt;.
+    /// </summary>
+    static string DefaultGameDirectory()
+    {
+        string drive = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows)) ?? "C:\\";
+        return Path.Combine(drive, "Games", "Chronicles");
     }
 
     public async Task HandleAsync(string cmd)
@@ -128,6 +138,7 @@ public sealed class LauncherController : IDisposable
             await CheckAsync();
             if (_channel is null) return;
         }
+        bool freshInstall = _installed is null;
         Directory.CreateDirectory(_layout.GameDirectory);
         _work = CancellationTokenSource.CreateLinkedTokenSource(_life.Token);
         PostState("updating");
@@ -146,6 +157,7 @@ public sealed class LauncherController : IDisposable
             _work.Dispose();
             _work = null;
             await CheckAsync();
+            if (freshInstall && _installed is not null) SetupShortcut();
         }
         catch (OperationCanceledException)
         {
@@ -187,13 +199,38 @@ public sealed class LauncherController : IDisposable
         if (folder is null) return;
         // An existing client (ro3.exe) or an empty folder is used as is; anything else gets its own subfolder.
         bool usable = File.Exists(Path.Combine(folder, "ro3.exe")) || !Directory.EnumerateFileSystemEntries(folder).Any();
-        if (!usable) folder = Path.Combine(folder, "RO3Emu");
+        if (!usable) folder = Path.Combine(folder, "Chronicles");
         _settings.ClientDirectory = folder;
         _settings.Save();
         _layout = new InstallLayout(folder);
         _installed = null;
         PostSettings();
         await CheckAsync();
+    }
+
+    /// <summary>
+    /// After the first install, the player should never need to find the exe in Downloads again: a copy moves
+    /// into the game folder and a desktop shortcut points at that copy. Best-effort — a failure here (locked
+    /// desktop, no WScript.Shell) must never block the player from reaching "Play".
+    /// </summary>
+    void SetupShortcut()
+    {
+        try
+        {
+            string installed = Path.Combine(_layout.GameDirectory, Path.GetFileName(_exePath));
+            if (!string.Equals(Path.GetFullPath(_exePath), Path.GetFullPath(installed), StringComparison.OrdinalIgnoreCase))
+                File.Copy(_exePath, installed, overwrite: true);
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            string shortcutPath = Path.Combine(desktop, _config.ServerName + ".lnk");
+            if (Type.GetTypeFromProgID("WScript.Shell") is not { } shellType) return;
+            dynamic shell = Activator.CreateInstance(shellType)!;
+            var shortcut = shell.CreateShortcut(shortcutPath);
+            shortcut.TargetPath = installed;
+            shortcut.WorkingDirectory = _layout.GameDirectory;
+            shortcut.IconLocation = installed + ",0";
+            shortcut.Save();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException) { }
     }
 
     async Task PingLoopAsync()

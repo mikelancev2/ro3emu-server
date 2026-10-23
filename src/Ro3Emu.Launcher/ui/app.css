@@ -105,7 +105,8 @@ ul{list-style:none;margin:0;padding:0}
   text-shadow:0 1px 2px rgba(0,0,30,.5);transition:transform .12s,filter .12s}
 .cream{background:linear-gradient(180deg,#fff8e6,#ecdcb4);box-shadow:inset 0 0 0 1px #fff,0 0 0 1px var(--gold-2);color:var(--ink);text-shadow:none;font-size:18px;height:52px;width:320px}
 .cream.small{width:auto;height:40px;padding:0 22px;font-size:13px;letter-spacing:.08em}
-.blue img,.cream img{width:30px;height:30px}
+.picon{display:inline-flex;width:30px;height:30px}
+.picon svg{width:100%;height:100%;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;fill:none}
 .blue:not(:disabled):hover,.cream:not(:disabled):hover{filter:brightness(1.08);transform:translateY(-1px)}
 .blue:not(:disabled):active,.cream:not(:disabled):active{transform:translateY(1px)}
 .blue:disabled,.cream:disabled{filter:grayscale(.85) brightness(1.05);opacity:.6}

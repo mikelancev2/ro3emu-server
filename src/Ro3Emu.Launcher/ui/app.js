@@ -10,11 +10,15 @@
   var stage = null;
 
   var DEFAULT_NEWS = [
-    { tag: "Welcome", color: "blue", title: "Welcome to RO3Emu", text: "Our own Ragnarok Online 3 server. Everything is still being built, so report anything that breaks." },
+    { tag: "Welcome", color: "blue", title: "Welcome to Chronicles", text: "Our own Ragnarok Online 3 server. Everything is still being built, so report anything that breaks." },
     { tag: "Account", color: "green", title: "No registration needed", text: "Type any username and password in the game. The account is created on your first login." },
     { tag: "Updates", color: "orange", title: "Automatic game updates", text: "New versions download here. Interrupted downloads resume where they stopped." },
   ];
   var COLORS = { blue: "var(--blue)", green: "var(--green)", orange: "var(--orange)", red: "var(--red)" };
+  var ICONS = {
+    download: '<svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16"/></svg>',
+    repair: '<svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.6 2.6-2-2z"/></svg>',
+  };
 
   function send(o) { host.post(o); }
   function size(b) { return b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GB" : Math.round(b / 1048576) + " MB"; }
@@ -65,7 +69,7 @@
       btn.disabled = !!p.wait;
       $("primary-label").textContent = p.button;
       ico.hidden = !p.icon;
-      // Button icons: drop PNGs into ui/assets/ui/<name>.png and set ico.src here.
+      if (p.icon) ico.innerHTML = ICONS[p.icon] || "";
     }
     $("repair").disabled = busy || !state.installed || !!p.wait;
     $("set-dir-change").disabled = busy;
@@ -157,7 +161,7 @@
     return {
       post: function (c) {
         if (c.cmd !== "ready") return;
-        emit({ type: "settings", dir: "C:\\Games\\RO3Emu\\Client", launcher: "1.0.0" });
+        emit({ type: "settings", dir: "C:\\Games\\Chronicles\\Client", launcher: "1.0.0" });
         emit({ type: "server", online: scenario !== "offline", players: 7 });
         if (scenario === "offline") return emit({ type: "state", phase: "offline" });
         if (scenario === "downloading") {

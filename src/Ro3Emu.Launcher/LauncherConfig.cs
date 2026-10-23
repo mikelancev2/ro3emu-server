@@ -10,7 +10,7 @@ public sealed class LauncherConfig
     [JsonPropertyName("repository")] public string Repository { get; set; } = "http://localhost:8790/";
     [JsonPropertyName("channel")] public string Channel { get; set; } = "test";
     [JsonPropertyName("server")] public string? Server { get; set; }
-    [JsonPropertyName("serverName")] public string ServerName { get; set; } = "RO3Emu";
+    [JsonPropertyName("serverName")] public string ServerName { get; set; } = "Chronicles";
 
     static readonly JsonSerializerOptions Options = new() { ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
 
