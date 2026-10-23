@@ -42,9 +42,9 @@ $copy = [
         'swordsman' => 'Espadachim', 'mage' => 'Mago', 'archer' => 'Arqueiro', 'acolyte' => 'Acolito',
         'download_label' => 'A aventura espera por você', 'download_title' => 'Seu próximo capítulo<br><em>está quase pronto.</em>',
         'download_copy' => 'Baixe o launcher, crie sua conta e prepare-se para entrar em Chronicles.', 'download_button' => 'Baixar launcher', 'download_soon' => 'Download disponível em breve',
-        'discord_button' => 'Entrar no Discord', 'modal_label' => 'Comece sua jornada', 'modal_title' => 'Crie sua <em>conta.</em>',
+        'discord_button' => 'Entrar no Discord', 'modal_label' => 'Comece sua jornada', 'modal_title' => 'Crie sua <em>conta.</em>', 'login_label' => 'Sua jornada continua', 'login_title' => 'Bem-vindo de <em>volta.</em>', 'login_copy' => 'Entre com o usuário e a senha que você criou para jogar.',
         'modal_copy' => 'Escolha suas credenciais para começar a sua história.', 'username' => 'Nome de usuário', 'email' => 'E-mail', 'password' => 'Senha', 'confirm' => 'Confirmar senha',
-        'terms' => 'Li e aceito os termos da comunidade.', 'submit' => 'Criar minha conta', 'close' => 'Fechar', 'form_notice' => 'O cadastro será ativado quando a API de contas estiver configurada.',
+        'terms' => 'Li e aceito os termos da comunidade.', 'submit' => 'Criar minha conta', 'login_submit' => 'Entrar', 'close' => 'Fechar', 'form_notice' => 'Sua conta será criada imediatamente.', 'login_notice' => 'Use estas mesmas credenciais no launcher para entrar no jogo.', 'forgot_password' => 'Esqueceu sua senha?', 'forgot_password_notice' => 'Para recuperar sua senha, fale com o suporte no Discord.', 'no_account' => 'Ainda não tem uma conta?', 'create_account' => 'Criar conta',
         'footer' => 'Uma nova aventura começa em breve.',
         'check' => 'Verificar', 'checking' => 'Verificando…', 'name_available' => 'Nome disponível.',
         'name_taken' => 'Esse nome já está em uso, escolha outro.', 'name_invalid' => 'Use 3–24 letras, números ou _.',
@@ -69,9 +69,9 @@ $copy = [
         'swordsman' => 'Swordsman', 'mage' => 'Mage', 'archer' => 'Archer', 'acolyte' => 'Acolyte',
         'download_label' => 'Adventure is waiting', 'download_title' => 'Your next chapter<br><em>is almost ready.</em>',
         'download_copy' => 'Download the launcher, create your account, and get ready to enter Chronicles.', 'download_button' => 'Download launcher', 'download_soon' => 'Download available soon',
-        'discord_button' => 'Join Discord', 'modal_label' => 'Begin your journey', 'modal_title' => 'Create your <em>account.</em>',
+        'discord_button' => 'Join Discord', 'modal_label' => 'Begin your journey', 'modal_title' => 'Create your <em>account.</em>', 'login_label' => 'Your journey continues', 'login_title' => 'Welcome <em>back.</em>', 'login_copy' => 'Sign in with the username and password you created to play.',
         'modal_copy' => 'Choose your credentials to begin your story.', 'username' => 'Username', 'email' => 'Email', 'password' => 'Password', 'confirm' => 'Confirm password',
-        'terms' => 'I have read and accept the community terms.', 'submit' => 'Create my account', 'close' => 'Close', 'form_notice' => 'Registration will be enabled when the account API is configured.',
+        'terms' => 'I have read and accept the community terms.', 'submit' => 'Create my account', 'login_submit' => 'Sign in', 'close' => 'Close', 'form_notice' => 'Your account will be created immediately.', 'login_notice' => 'Use these same credentials in the launcher to enter the game.', 'forgot_password' => 'Forgot your password?', 'forgot_password_notice' => 'To recover your password, contact support on Discord.', 'no_account' => 'Don\'t have an account yet?', 'create_account' => 'Create account',
         'footer' => 'A new adventure begins soon.',
         'check' => 'Check', 'checking' => 'Checking…', 'name_available' => 'Name available.',
         'name_taken' => 'That name is already taken, choose another.', 'name_invalid' => 'Use 3–24 letters, numbers or _.',
@@ -96,9 +96,9 @@ $copy = [
         'swordsman' => 'Espadachín', 'mage' => 'Mago', 'archer' => 'Arquero', 'acolyte' => 'Acólito',
         'download_label' => 'La aventura te espera', 'download_title' => 'Tu próximo capítulo<br><em>está casi listo.</em>',
         'download_copy' => 'Descarga el launcher, crea tu cuenta y prepárate para entrar en Chronicles.', 'download_button' => 'Descargar launcher', 'download_soon' => 'Descarga disponible pronto',
-        'discord_button' => 'Unirse a Discord', 'modal_label' => 'Comienza tu jornada', 'modal_title' => 'Crea tu <em>cuenta.</em>',
+        'discord_button' => 'Unirse a Discord', 'modal_label' => 'Comienza tu jornada', 'modal_title' => 'Crea tu <em>cuenta.</em>', 'login_label' => 'Tu jornada continúa', 'login_title' => 'Bienvenido de <em>vuelta.</em>', 'login_copy' => 'Inicia sesión con el usuario y la contraseña que creaste para jugar.',
         'modal_copy' => 'Elige tus credenciales para comenzar tu historia.', 'username' => 'Nombre de usuario', 'email' => 'Correo electrónico', 'password' => 'Contraseña', 'confirm' => 'Confirmar contraseña',
-        'terms' => 'He leído y acepto los términos de la comunidad.', 'submit' => 'Crear mi cuenta', 'close' => 'Cerrar', 'form_notice' => 'El registro se activará cuando se configure la API de cuentas.',
+        'terms' => 'He leído y acepto los términos de la comunidad.', 'submit' => 'Crear mi cuenta', 'login_submit' => 'Iniciar sesión', 'close' => 'Cerrar', 'form_notice' => 'Tu cuenta se creará inmediatamente.', 'login_notice' => 'Usa estas mismas credenciales en el launcher para entrar al juego.', 'forgot_password' => '¿Olvidaste tu contraseña?', 'forgot_password_notice' => 'Para recuperar tu contraseña, habla con soporte en Discord.', 'no_account' => '¿Aún no tienes una cuenta?', 'create_account' => 'Crear cuenta',
         'footer' => 'Una nueva aventura comienza pronto.',
         'check' => 'Verificar', 'checking' => 'Verificando…', 'name_available' => 'Nombre disponible.',
         'name_taken' => 'Ese nombre ya está en uso, elige otro.', 'name_invalid' => 'Usa 3–24 letras, números o _.',
@@ -148,7 +148,7 @@ function h(string $value): string
                 <summary aria-label="<?= h($languageMenuLabel) ?>"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.8 12h16.4M12 3.5c2.1 2.3 3.2 5.1 3.2 8.5S14.1 18.2 12 20.5M12 3.5C9.9 5.8 8.8 8.6 8.8 12s1.1 6.2 3.2 8.5"></path></svg><span><?= h(strtoupper($language)) ?></span><i aria-hidden="true"></i></summary>
                 <div class="language-options"><?php foreach ($languages as $code => $label): ?><a class="<?= $code === $language ? 'selected' : '' ?>" href="?lang=<?= h($code) ?>" lang="<?= h($code) ?>" hreflang="<?= h($code) ?>"<?= $code === $language ? ' aria-current="page"' : '' ?>><span><?= h(strtoupper($code)) ?></span><strong><?= h($label) ?></strong><b aria-hidden="true"><?= $code === $language ? '✓' : '' ?></b></a><?php endforeach; ?></div>
             </details>
-            <button class="fantasy-button small" type="button" data-open-account><span><?= h($copy['account']) ?></span></button>
+            <button class="fantasy-button small" type="button" data-open-login><span><?= h($copy['account']) ?></span></button>
         </div>
     </header>
 
@@ -211,20 +211,22 @@ function h(string $value): string
     <?php endif; ?>
     <form method="post" data-account-ready="<?= $config['accounts_api'] !== '' ? 'true' : 'false' ?>" data-register-url="api/register.php" data-check-url="api/check-username.php">
         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-        <label><?= h($copy['username']) ?><span class="field-with-action"><input name="username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" value="<?= $prefillEmail !== '' ? h(explode('@', $prefillEmail)[0]) : '' ?>" required><button type="button" class="cream small" data-check-username><?= h($copy['check']) ?></button></span></label>
-        <p class="username-status" data-username-status role="status"></p>
         <label><?= h($copy['email']) ?><span><input name="email" type="email" autocomplete="email" value="<?= h($prefillEmail) ?>" required></span></label>
+        <label><?= h($copy['username']) ?><span><input name="username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" value="<?= $prefillEmail !== '' ? h(explode('@', $prefillEmail)[0]) : '' ?>" required></span></label>
+        <p class="username-status" data-username-status role="status"></p>
         <div class="form-row"><label><?= h($copy['password']) ?><span><input name="password" type="password" autocomplete="new-password" minlength="8" required></span></label><label><?= h($copy['confirm']) ?><span><input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" required></span></label></div>
         <label class="terms"><input type="checkbox" required><i></i><span><?= h($copy['terms']) ?></span></label>
         <button class="fantasy-button modal-submit" type="submit"><span><?= h($copy['submit']) ?></span><b>→</b></button>
         <p class="form-message" data-form-message role="status"></p>
         <p class="form-note" role="status"><?= h($copy['form_notice']) ?></p>
     </form></dialog>
+    <dialog class="account-modal login-modal" aria-labelledby="login-title"><div class="modal-glow" aria-hidden="true"></div><button class="modal-close" type="button" data-close-login aria-label="<?= h($copy['close']) ?>">×</button><div class="modal-crest">✦</div><p class="eyebrow"><?= h($copy['login_label']) ?></p><h2 id="login-title"><?= $copy['login_title'] ?></h2><p class="modal-copy"><?= h($copy['login_copy']) ?></p>
+        <form data-login-form><label><?= h($copy['username']) ?><span><input name="username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" required></span></label><label><?= h($copy['password']) ?><span><input name="password" type="password" autocomplete="current-password" minlength="8" required></span></label><button class="fantasy-button modal-submit" type="submit"><span><?= h($copy['login_submit']) ?></span><b>→</b></button><p class="form-message" data-login-message role="status"></p><div class="modal-links"><button type="button" data-forgot-password><?= h($copy['forgot_password']) ?></button><span><?= h($copy['no_account']) ?> <button type="button" data-open-account><?= h($copy['create_account']) ?></button></span></div><p class="form-note" data-login-note><?= h($copy['login_notice']) ?></p></form></dialog>
     <script>window.CHRONICLES_I18N = <?= json_encode([
         'check' => $copy['check'], 'checking' => $copy['checking'], 'nameAvailable' => $copy['name_available'],
         'nameTaken' => $copy['name_taken'], 'nameInvalid' => $copy['name_invalid'], 'passwordMismatch' => $copy['password_mismatch'],
         'registerSuccess' => $copy['register_success'], 'registerErrorGeneric' => $copy['register_error_generic'],
-        'registerErrorDisabled' => $copy['register_error_disabled'],
+        'registerErrorDisabled' => $copy['register_error_disabled'], 'loginNotice' => $copy['login_notice'], 'forgotPasswordNotice' => $copy['forgot_password_notice'],
     ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;</script>
     <script src="assets/vendor/gsap/gsap.min.js?v=3.15.0"></script>
     <script src="assets/vendor/gsap/ScrollTrigger.min.js?v=3.15.0"></script>

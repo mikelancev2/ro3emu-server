@@ -1,17 +1,29 @@
 const menuButton = document.querySelector('.menu-toggle');
 const navigation = document.querySelector('.site-header nav');
 const accountModal = document.querySelector('.account-modal');
+const loginModal = document.querySelector('.login-modal');
 const glow = document.querySelector('.cursor-glow');
 const languageMenus = document.querySelectorAll('.language-menu');
 
-function framePath(context, width, height, inset) {
+function framePath(context, width, height, inset, radius = 0) {
     const left = inset;
     const right = width - inset;
     const top = inset;
     const bottom = height - inset;
 
     context.beginPath();
-    context.rect(left, top, right - left, bottom - top);
+    if (radius === 0) {
+        context.rect(left, top, right - left, bottom - top);
+        return;
+    }
+
+    const corner = Math.min(radius, (right - left) / 2, (bottom - top) / 2);
+    context.moveTo(left + corner, top);
+    context.arcTo(right, top, right, bottom, corner);
+    context.arcTo(right, bottom, left, bottom, corner);
+    context.arcTo(left, bottom, left, top, corner);
+    context.arcTo(left, top, right, top, corner);
+    context.closePath();
 }
 
 function drawCanvasButton(canvas, secondary, hover, shine) {
@@ -30,6 +42,7 @@ function drawCanvasButton(canvas, secondary, hover, shine) {
     const context = canvas.getContext('2d');
     const width = bounds.width;
     const height = bounds.height;
+    const cornerRadius = button.classList.contains('small') ? 8 : button.closest('.hero-actions, .download-actions') ? 6 : 0;
     const palette = secondary
         ? { top: '#ffffff', middle: '#e9f4fa', bottom: '#b4d3e6' }
         : { top: '#1686cb', middle: '#07519a', bottom: '#052759' };
@@ -41,7 +54,7 @@ function drawCanvasButton(canvas, secondary, hover, shine) {
     context.shadowColor = secondary ? 'rgba(22, 74, 111, .28)' : 'rgba(3, 30, 74, .48)';
     context.shadowBlur = 7 + hover * 6;
     context.shadowOffsetY = 4;
-    framePath(context, width, height, 3);
+    framePath(context, width, height, 3, cornerRadius);
     const face = context.createLinearGradient(0, 3, 0, height - 3);
     face.addColorStop(0, palette.top);
     face.addColorStop(0.2, palette.middle);
@@ -52,7 +65,7 @@ function drawCanvasButton(canvas, secondary, hover, shine) {
     context.shadowColor = 'transparent';
 
     context.save();
-    framePath(context, width, height, 3);
+    framePath(context, width, height, 3, cornerRadius);
     context.clip();
     const glowGradient = context.createRadialGradient(width * 0.5, height * 0.05, 0, width * 0.5, height * 0.05, width * 0.5);
     glowGradient.addColorStop(0, secondary ? `rgba(255,255,255,${0.52 + hover * 0.16})` : `rgba(83,217,255,${0.2 + hover * 0.15})`);
@@ -196,22 +209,35 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') languageMenus.forEach((menu) => menu.removeAttribute('open'));
 });
 
-document.querySelectorAll('[data-open-account]').forEach((button) => {
-    button.addEventListener('click', () => {
-        document.body.classList.add('modal-open');
-        accountModal?.showModal();
-    });
-});
+function openModal(modal) {
+    if (accountModal?.open && accountModal !== modal) accountModal.close();
+    if (loginModal?.open && loginModal !== modal) loginModal.close();
+    document.body.classList.add('modal-open');
+    if (modal && !modal.open) modal.showModal();
+}
+
+document.querySelectorAll('[data-open-account]').forEach((button) => button.addEventListener('click', () => openModal(accountModal)));
+document.querySelectorAll('[data-open-login]').forEach((button) => button.addEventListener('click', () => openModal(loginModal)));
 
 function closeAccountModal() {
     accountModal?.close();
     document.body.classList.remove('modal-open');
 }
 
+function closeLoginModal() {
+    loginModal?.close();
+    document.body.classList.remove('modal-open');
+}
+
 document.querySelector('[data-close-account]')?.addEventListener('click', closeAccountModal);
+document.querySelector('[data-close-login]')?.addEventListener('click', closeLoginModal);
 accountModal?.addEventListener('close', () => document.body.classList.remove('modal-open'));
 accountModal?.addEventListener('click', (event) => {
     if (event.target === accountModal) closeAccountModal();
+});
+loginModal?.addEventListener('close', () => document.body.classList.remove('modal-open'));
+loginModal?.addEventListener('click', (event) => {
+    if (event.target === loginModal) closeLoginModal();
 });
 
 if (accountModal?.hasAttribute('data-auto-open')) {
@@ -223,7 +249,6 @@ const registrationForm = accountModal?.querySelector('form');
 const password = registrationForm?.querySelector('[name="password"]');
 const confirmation = registrationForm?.querySelector('[name="password_confirmation"]');
 const usernameField = registrationForm?.querySelector('[name="username"]');
-const checkButton = registrationForm?.querySelector('[data-check-username]');
 const usernameStatus = registrationForm?.querySelector('[data-username-status]');
 const formMessage = registrationForm?.querySelector('[data-form-message]');
 const i18n = window.CHRONICLES_I18N || {};
@@ -235,6 +260,19 @@ function setStatus(element, text, kind) {
     element.classList.remove('status-ok', 'status-error');
     if (kind) element.classList.add(kind);
 }
+
+const loginForm = loginModal?.querySelector('[data-login-form]');
+const loginMessage = loginForm?.querySelector('[data-login-message]');
+const forgotPasswordButton = loginModal?.querySelector('[data-forgot-password]');
+
+loginForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    setStatus(loginMessage, i18n.loginNotice ?? '', 'status-ok');
+});
+
+forgotPasswordButton?.addEventListener('click', () => {
+    setStatus(loginMessage, i18n.forgotPasswordNotice ?? '', 'status-ok');
+});
 
 async function checkUsernameAvailability() {
     const name = usernameField?.value.trim() ?? '';
@@ -252,7 +290,6 @@ async function checkUsernameAvailability() {
     }
 }
 
-checkButton?.addEventListener('click', checkUsernameAvailability);
 usernameField?.addEventListener('blur', () => { if (usernameField.value.trim()) checkUsernameAvailability(); });
 usernameField?.addEventListener('input', () => setStatus(usernameStatus, '', null));
 
