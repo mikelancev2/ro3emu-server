@@ -15,6 +15,17 @@ public static class ReleaseBuilder
     private const string BaselineHeader = "RO3RECOVERYVERIFIEDBASELINE1";
     private const string ManagedPrefix = "ro3_Data/Managed/";
 
+    /// <summary>
+    /// (inferred) Paths the official launcher's baseline includes but the client itself keeps rewriting while
+    /// playing (a growing log, a locale-miss tally): published anyway, they never match the player's copy again
+    /// after their first session, so every later launch reports them "changed" and "Repair" only restores the
+    /// stale published bytes until the next session dirties them again. Catalogued by hand from two observed
+    /// cases; add to this list if another file shows the same symptom.
+    /// </summary>
+    private static readonly string[] MutableAtRuntime = ["Logs/setup.log", "ro3emu/loc_misses.tsv"];
+    private static bool IsMutableAtRuntime(string relative) =>
+        Array.Exists(MutableAtRuntime, p => string.Equals(p, relative, StringComparison.OrdinalIgnoreCase));
+
     public static async Task<int> PublishAsync(string clientDir, string serverUrl, string pem, string repoDir, string version, string channel, int compression)
     {
         clientDir = Path.GetFullPath(clientDir);
@@ -42,6 +53,7 @@ public static class ReleaseBuilder
         var mismatched = new List<string>();
         foreach (var (relative, size) in baseline)
         {
+            if (IsMutableAtRuntime(relative)) continue;
             if (relative.StartsWith(ManagedPrefix, StringComparison.OrdinalIgnoreCase))
             {
                 files.Add(new(relative, Path.Combine(stagedManaged, relative[ManagedPrefix.Length..])));
