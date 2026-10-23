@@ -149,6 +149,24 @@ public sealed class ServerOptions
     public int RaidPreparationSeconds { get; set; } = 120;
 
     /// <summary>
+    /// Pace of the scripted scenes' own timers (the hide-and-seek rounds), in percent of their reconstructed length:
+    /// 100 plays them as designed, a test makes them shorter.
+    /// </summary>
+    public int ScriptedScenePacePercent { get; set; } = 100;
+
+    /// <summary>
+    /// (inferred) Star Cores drop for roles with the Astral Level open (ParagonService.StarCoreDrops). The client data gives
+    /// them no source; false turns the reconstructed drop off.
+    /// </summary>
+    public bool StarCoreDrops { get; set; } = true;
+
+    /// <summary>
+    /// (inferred) Chance in percent that an MVP kill drops a Lord's Mane, the Starshatter Dragon's unseal material, to one
+    /// participant (MvpService). The client data gives it no source; 0 turns it off.
+    /// </summary>
+    public int LordsManePercent { get; set; } = 10;
+
+    /// <summary>
     /// (inferred) Seconds from a raid boss fight's start to its enrage, against which the Final Trial "more than N minutes
     /// remaining until enrage" honors (TenGameplayFinalTrialConfig, condition 7004) are judged. The enrage timer lives in
     /// the boss's server script, which the client does not carry.
