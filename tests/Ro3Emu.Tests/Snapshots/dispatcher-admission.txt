@@ -163,7 +163,7 @@
 30449	session Realm:legacy: dispatcher/unrouted	refused
 30450	session Realm:legacy: dispatcher/unrouted	refused
 30451	session Realm:legacy: dispatcher/unrouted	refused
-30452	session Realm:legacy: dispatcher/unrouted	refused
+30452	session Realm:legacy: dispatcher/30452	refused
 30501	session Realm:legacy: dispatcher/unrouted	refused
 30502	session Realm:legacy: dispatcher/unrouted	refused
 30503	session Realm:legacy: dispatcher/unrouted	refused
@@ -394,7 +394,7 @@
 32237	economic dispatcher/economic request	refused
 32238	session Realm:legacy: dispatcher/unrouted	refused
 32239	economic dispatcher/economic request	refused
-32241	session Realm:legacy: dispatcher/unrouted	refused
+32241	economic dispatcher/economic request	refused
 32242	economic dispatcher/economic request	refused
 32243	session Realm:legacy: dispatcher/unrouted	refused
 32247	economic dispatcher/economic request	refused
@@ -405,7 +405,7 @@
 32255	economic dispatcher/economic request	refused
 32256	session Realm:legacy: dispatcher/32256	refused
 32257	economic dispatcher/economic request	refused
-32266	session Realm:legacy: dispatcher/unrouted	refused
+32266	economic dispatcher/economic request	refused
 32267	session Realm:legacy: dispatcher/unrouted	refused
 32268	session Realm:legacy: dispatcher/unrouted	refused
 32269	economic dispatcher/economic request	refused

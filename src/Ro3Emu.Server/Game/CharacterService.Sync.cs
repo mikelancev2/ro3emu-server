@@ -52,7 +52,9 @@ public sealed partial class CharacterService
     private async Task SyncItemsAsync(GameSession session, Func<bool>? stillOwner = null)
     {
         var now = BuildItems(session);
-        if (now.StoragePack != null && session.Synced.GetValueOrDefault(ItemsSync) is DBItemsInfo { StoragePack: null }) session.Synced.Remove(ItemsSync);
+        // Rebuild after dropping the old snapshot: retained empty packs have no sortedIndex in a full
+        // protobuf decode, but LC_DAL_Knapsack.InitPackData iterates that map for every supplied pack.
+        if (ResendItemsWholeIfNeeded(session, now)) now = BuildItems(session);
         await SyncAsync(session, ItemsSync, now);
         if (stillOwner?.Invoke() == false) return;
         if (PruneEquipmentPlans(session))
@@ -60,6 +62,23 @@ public sealed partial class CharacterService
             roles.SaveEquipPlans(session.Role!.Id, session.EquipmentPlans.ToByteArray());
             await SyncEquipmentAsync(session);
         }
+    }
+
+    /// <summary>
+    /// 5009 goes out whole again when it carries a part the client only builds from a full sync: storagePack (see
+    /// <see cref="SyncItemsAsync"/>) or a bag pack the client was never sent. LC_DAL_Knapsack.InitPackData -> InitGridInfo
+    /// builds each pack's grid from the full sync only, so gear sent into a pack missing at login (a new character's
+    /// first unequipped gear: the starter weapon and shirt are worn, so pack 2 is absent) is stored but never shown.
+    /// </summary>
+    private static bool ResendItemsWholeIfNeeded(GameSession session, DBItemsInfo now)
+    {
+        if (session.Synced.GetValueOrDefault(ItemsSync) is DBItemsInfo sent
+            && (now.StoragePack != null && sent.StoragePack == null || now.PackInfo.Keys.Any(k => !sent.PackInfo.ContainsKey(k))))
+        {
+            session.Synced.Remove(ItemsSync);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>5066: PlayerBasicInfo (id and career are mandatory); exp is the progress inside the level.</summary>
@@ -98,14 +117,7 @@ public sealed partial class CharacterService
         var info = new DBItemsInfo { AutoDecomposeSetting = session.AutoDecompose.Clone() };
         var preferences = session.BagState.Info;
         info.QuickUseInfos.Add(preferences.QuickUseInfos);
-        // The client's incremental shortcutBarInfos update only replaces an entry it already has at that slot
-        // index (LC_DAL_Item.OnShortcutBarInfosUpdate skips a slot with no prior entry); a slot that was never
-        // filled has no entry at all, so the first item ever dropped there doesn't render until an unrelated
-        // full refresh happens. Sending every slot (empty ones as ItemGuid 0) keeps the client's array pre-seeded.
-        var filled = preferences.ShortcutBarInfos.ToDictionary(i => i.SlotIndex);
-        for (int slot = 0; slot < ShortcutSlotLimit; slot++)
-            info.ShortcutBarInfos.Add(filled.TryGetValue(slot, out var existing) ? existing
-                : new ShortcutBarInfo { SlotIndex = slot, ItemGuid = 0 });
+        info.ShortcutBarInfos.Add(FullShortcutBar(preferences.ShortcutBarInfos));
         // A character that never opened the auto-drink panel has no HpConfig/SpConfig; the client reads Condition
         // on open regardless of IsOpen and crashes on the nil (the same absent-field hazard PackInfo guards against).
         info.MedicinesAutoUse = preferences.MedicinesAutoUse?.Clone() ?? new MedicinesAutoUseSet
