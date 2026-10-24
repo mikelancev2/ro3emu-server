@@ -118,13 +118,7 @@ public sealed partial class CharacterService
         var preferences = session.BagState.Info;
         info.QuickUseInfos.Add(preferences.QuickUseInfos);
         info.ShortcutBarInfos.Add(FullShortcutBar(preferences.ShortcutBarInfos));
-        // A character that never opened the auto-drink panel has no HpConfig/SpConfig; the client reads Condition
-        // on open regardless of IsOpen and crashes on the nil (the same absent-field hazard PackInfo guards against).
-        info.MedicinesAutoUse = preferences.MedicinesAutoUse?.Clone() ?? new MedicinesAutoUseSet
-        {
-            HpConfig = new MedicinesAutoUse { Condition = 50 },
-            SpConfig = new MedicinesAutoUse { Condition = 50 },
-        };
+        info.MedicinesAutoUse = WithMedicineDefaults(preferences.MedicinesAutoUse);
         info.CurrentArrowID = preferences.CurrentArrowID;
         info.ItemCds = preferences.ItemCds?.Clone();
         info.ShareCds = preferences.ShareCds?.Clone();
