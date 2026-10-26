@@ -571,6 +571,16 @@ public sealed class QuestEngineTests : IAsyncLifetime
         Assert.Equal(1, await Read(s => Service<CharacterService>().CountOf(s, 1501014)));
     }
 
+    [ClientDataFact]
+    public async Task NovicePassTaskAwardResolvesTheDirectAwardConfigNotAMultiverseGroup()
+    {
+        // 9201101's _iAward (920160) is an AwardConfig id, not a MultiverseGroupConfig one: TaskService must route
+        // TaskSonType 9201 (novice pass) tasks through AwardService.ResolveDirect, the same way TrainingService does.
+        await using var bot = await InWorld();
+        await Gm("!quest done 9201101");
+        Assert.Equal(TaskState.Delivery, (await State(9201101)).Status);
+    }
+
     private static string RepoRoot()
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)

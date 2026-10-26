@@ -593,7 +593,11 @@ public sealed partial class TaskService
             // 5021 is the authoritative season snapshot sent to this session, also used by client previews.
             int? playBook = session.Synced.GetValueOrDefault(SeasonService.SeasonSync) is DBSeasonInfo { Current: { } current }
                 ? (int)current.PlayBookId : null;
-            var plan = _awards.Resolve(session, def.Award, playBook);
+            // Most _iAward values are a MultiverseGroupConfig route; the novice pass's 9201 tasks name an AwardConfig
+            // directly instead (TrainingService.ClaimAsync tells the two apart the same way).
+            var plan = _data.Row("MultiverseGroupConfig", def.Award) != null
+                ? _awards.Resolve(session, def.Award, playBook)
+                : _awards.ResolveDirect(session, def.Award);
             var runtime = new TaskRuntimeState { CompletedGuides = session.TaskRuntime.CompletedGuides.ToHashSet(), InCutScene = session.InCutScene || cutScene };
             string awardSource = $"task/{session.Role!.Id}/{id}/{next.CompleteTaskNum[id]}/" +
                 $"{session.Daily?.DailyEpoch ?? 0}/{session.Daily?.WeeklyEpoch ?? 0}";

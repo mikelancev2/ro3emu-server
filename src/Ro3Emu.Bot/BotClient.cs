@@ -113,11 +113,33 @@ public sealed class BotClient : IAsyncDisposable
     // ---------------------------------------------------------------- login
 
     /// <summary>SDK login, server list, micro gate handshake, verifySdk and getRoleInfo.</summary>
+    /// <remarks>
+    /// SDK login only signs an identity in; it never registers one (/ro3emu/accounts/register, the website's own
+    /// loopback-only endpoint, is the one place an account is created). So a bot registers itself the same way the
+    /// website would before it signs in, first through /ro3emu/accounts/available (a plain existence check) so a
+    /// relog or reconnect does not pay registration's PBKDF2 hash a second time just to be told the name is taken
+    /// (AccountEndpoints requires an 8+ character password; <paramref name="credential"/> is padded up to that for
+    /// the actual request if a caller passed a shorter test password, the padded form used for both calls).
+    /// </remarks>
     public async Task LoginAsync(string identity, string credential)
     {
+        string password = credential.Length < 8 ? credential.PadRight(8, '0') : credential;
+        await StageAsync("register", async () =>
+        {
+            var available = await (await _http.GetAsync($"/ro3emu/accounts/available?name={Uri.EscapeDataString(identity)}", _cts.Token))
+                .Content.ReadFromJsonAsync<JsonElement>(_cts.Token);
+            if (available.TryGetProperty("available", out var flag) && !flag.GetBoolean()) return; // already registered
+            using var form = new FormUrlEncodedContent(new Dictionary<string, string>
+            { ["name"] = identity, ["password"] = password, ["email"] = $"{identity}@ro3emu-bot.test" });
+            await _http.PostAsync("/ro3emu/accounts/register", form, _cts.Token);
+            // Ignored: 200 (registered), 404 (not loopback; the real client never calls either endpoint), 409 (a
+            // concurrent bot won the race since the availability check) and 400 (identity does not fit the website's
+            // name rules) all fall through to sdk-login, which reports the actual outcome.
+        });
+
         string ticket = await StageAsync("sdk-login", async () =>
         {
-            using var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = identity, ["credential"] = credential, ["channel_id"] = "15" });
+            using var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = identity, ["credential"] = password, ["channel_id"] = "15" });
             var login = await (await _http.PostAsync("/sdk/login", form, _cts.Token)).Content.ReadFromJsonAsync<JsonElement>(_cts.Token);
             long code = login.GetProperty("code").GetInt64();
             if (code != 0) throw Refused("sdk-login", code, $"sdk login refused: {login}");
