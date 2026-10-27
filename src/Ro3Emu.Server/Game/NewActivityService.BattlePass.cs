@@ -238,9 +238,10 @@ public sealed partial class NewActivityService
                 changed |= level != current.Level || exp != current.Exp;
             }
             int premiumItem = checked((int)GameData.Int(config, "_iPremiumItemId"));
-            // Ro3Emu:Pass:FreePremium: the premium track opens without spending the item.
+            // Realm policy can leave selected activities (the beginner pass) free while paid passes use their item.
+            bool freePremium = _freePremiumPass || _freePremiumPassActivities.Contains(activityId);
             bool owned = Owned(session, premiumItem) > 0;
-            bool activate = (reset || !current.Premium) && (_freePremiumPass || owned);
+            bool activate = (reset || !current.Premium) && (freePremium || owned);
             changed |= activate;
             if (!changed) continue;
             var next = session.NewActivities.Clone();
@@ -259,7 +260,7 @@ public sealed partial class NewActivityService
             var nextRuntime = CloneRuntime(session);
             nextRuntime.PassProgress[activityId] = new PassProgressRuntime
             { Initialized = true, LastBalance = balance, ActivityInstance = info.ActivityInstance };
-            var costs = activate && !_freePremiumPass ? new[] { (Entry: premiumItem, Count: 1) } : [];
+            var costs = activate && !freePremium ? new[] { (Entry: premiumItem, Count: 1) } : [];
             if (await CommitAsync(session, next, costs: costs, runtime: nextRuntime,
                 source: $"pass/activate/{activityId}/{info.ActivityInstance}/{premiumItem}") != 0) return;
         }

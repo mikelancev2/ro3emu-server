@@ -3,22 +3,21 @@
 declare(strict_types=1);
 
 /*
- * Google's redirect back. Verifies the CSRF state, exchanges the code for a verified email, then forgets
- * everything about Google: the email only pre-fills the normal registration form (index.php reads
- * $_SESSION['prefill_email'] once and unsets it). No Google identity, token or link is ever written to
- * disk or to the game server.
+ * Google's redirect back. A verified immutable Google subject either resolves to its already linked Chronicles
+ * account or remains in this browser session until the normal registration form creates that account atomically.
+ * OAuth tokens are discarded immediately and never reach the game database.
  */
 
+require __DIR__ . '/../includes/csrf.php';
 $config = require __DIR__ . '/../site-config.php';
 
-if ($config['google_client_id'] === '' || $config['google_client_secret'] === '' || $config['google_redirect_uri'] === '') {
+if ($config['google_client_id'] === '' || $config['google_client_secret'] === '' || $config['google_redirect_uri'] === ''
+    || $config['accounts_api'] === '') {
     http_response_code(404);
     exit;
 }
 
-if (session_status() !== PHP_SESSION_ACTIVE) {
-    session_start();
-}
+site_session_start();
 
 function failBack(): never
 {
@@ -49,11 +48,12 @@ curl_setopt_array($tokenCh, [
     CURLOPT_TIMEOUT => 10,
 ]);
 $tokenResponse = curl_exec($tokenCh);
+$tokenStatus = curl_getinfo($tokenCh, CURLINFO_HTTP_CODE);
 curl_close($tokenCh);
 $token = is_string($tokenResponse) ? json_decode($tokenResponse, true) : null;
 $accessToken = is_array($token) ? ($token['access_token'] ?? null) : null;
 
-if (!is_string($accessToken)) {
+if ($tokenStatus !== 200 || !is_string($accessToken)) {
     failBack();
 }
 
@@ -64,14 +64,39 @@ curl_setopt_array($userCh, [
     CURLOPT_TIMEOUT => 10,
 ]);
 $userResponse = curl_exec($userCh);
+$userStatus = curl_getinfo($userCh, CURLINFO_HTTP_CODE);
 curl_close($userCh);
 $profile = is_string($userResponse) ? json_decode($userResponse, true) : null;
-$email = is_array($profile) && !empty($profile['email_verified']) ? ($profile['email'] ?? null) : null;
+$email = is_array($profile) && ($profile['email_verified'] ?? false) === true ? ($profile['email'] ?? null) : null;
+$subject = is_array($profile) ? ($profile['sub'] ?? null) : null;
 
-if (!is_string($email)) {
+if ($userStatus !== 200 || !is_string($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)
+    || !is_string($subject) || !preg_match('/^[A-Za-z0-9_-]{1,255}$/', $subject)) {
     failBack();
 }
 
-$_SESSION['prefill_email'] = $email;
+$lookup = curl_init(rtrim($config['accounts_api'], '/') . '/google?subject=' . rawurlencode($subject));
+curl_setopt_array($lookup, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8]);
+$lookupResponse = curl_exec($lookup);
+$lookupStatus = curl_getinfo($lookup, CURLINFO_HTTP_CODE);
+curl_close($lookup);
+$identity = is_string($lookupResponse) ? json_decode($lookupResponse, true) : null;
+if ($lookupStatus === 200 && is_array($identity) && ($identity['ok'] ?? false) === true && is_string($identity['account'] ?? null)) {
+    session_regenerate_id(true);
+    $_SESSION['account'] = $identity['account'];
+    $_SESSION['authenticated_at'] = time();
+    unset($_SESSION['google_identity']);
+    header('Location: /panel.php');
+    exit;
+}
+if ($lookupStatus !== 404) {
+    failBack();
+}
+
+$_SESSION['google_identity'] = [
+    'provider' => 'google',
+    'subject' => $subject,
+    'email' => strtolower($email),
+];
 header('Location: /?open_account=1');
 exit;

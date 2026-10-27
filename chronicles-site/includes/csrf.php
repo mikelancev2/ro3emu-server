@@ -8,11 +8,24 @@ declare(strict_types=1);
  * read, so it does not need this.
  */
 
-function csrf_token(): string
+function site_session_start(): void
 {
     if (session_status() !== PHP_SESSION_ACTIVE) {
+        session_name('chronicles_session');
+        session_set_cookie_params([
+            'lifetime' => 0,
+            'path' => '/',
+            'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
         session_start();
     }
+}
+
+function csrf_token(): string
+{
+    site_session_start();
     if (empty($_SESSION['csrf_token'])) {
         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
     }
@@ -21,8 +34,6 @@ function csrf_token(): string
 
 function csrf_verify(?string $token): bool
 {
-    if (session_status() !== PHP_SESSION_ACTIVE) {
-        session_start();
-    }
+    site_session_start();
     return is_string($token) && !empty($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
 }

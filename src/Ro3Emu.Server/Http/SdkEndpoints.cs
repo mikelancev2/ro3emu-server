@@ -39,9 +39,9 @@ public static class SdkEndpoints
             {
                 return Results.Json(new { code = 401 });
             }
-            var (result, account) = await accounts.SignInAsync(identity, credential);
-            log.LogInformation("SDK login {Identity}: {Result}", account, result);
-            if (result == AccountStore.LoginResult.BadPassword)
+            string? account = await accounts.VerifiedAccountAsync(identity, credential);
+            log.LogInformation("SDK login {Identity}: {Result}", identity, account is null ? "Rejected" : "Ok");
+            if (account is null)
             {
                 return Results.Json(new { code = 401 });
             }

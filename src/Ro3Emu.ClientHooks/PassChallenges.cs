@@ -33,6 +33,9 @@ namespace Ro3Emu.ClientHooks
         // ProgressConfig 103022 (as season task 110001) only makes the progress entry valid for LC_ConditionManager; the number shown is ours.
         private const long ProgressCondition = 103022;
         private const int PassExpItem = 132;
+        // ShopConfig class 260: Hunting Coin point-shop cosmetics.  The client owns this catalogue, so mirror the
+        // server's prices here rather than letting its baked 200/400 quote disagree with the actual debit.
+        private const long HuntingShopFirstCommodity = 26101, HuntingShopLastCommodity = 26120;
 
         private sealed class Challenge
         {
@@ -169,6 +172,7 @@ namespace Ro3Emu.ClientHooks
             foreach (var reward in new long[] { 300, 1000 }) Award(groups, awards, reward);
             foreach (var c in Daily) { Text(texts, ++text, c.Text); Task(tasks, c, DailySonType, text); }
             foreach (var c in Weekly) { Text(texts, ++text, c.Text); Task(tasks, c, WeeklySonType, text); }
+            int huntingPrices = PatchHuntingShopPrices(dbm);
             var group13 = types.Obf_ruA<long, Obf_R.Obf_ff>(TaskType);
             if (group13 != null)
             {
@@ -179,7 +183,28 @@ namespace Ro3Emu.ClientHooks
                 "_iID", ActivityId, "_iName", List(title), "_iActivityType", 0L,
                 "_kTaskRenew", List(List(0L, TaskType, DailySonType, 0L), List(0L, TaskType, WeeklySonType, 0L))));
             NovicePass.Inject(dbm, texts);
+            if (huntingPrices > 0) Debug.Log("[Ro3Emu.Shop] updated " + huntingPrices + " Hunting Coin cosmetic price(s)");
             return Present();
+        }
+
+        /// <summary>
+        /// The point-shop's 20 Hunting Coin cosmetics (ShopCommodityConfig 26101–26120).  The first ten were 400,
+        /// the final ten 200 in the publisher's table; Chronicles charges 8,000 and 4,000 respectively.
+        /// </summary>
+        private static int PatchHuntingShopPrices(Obf_R.Obf_ff dbm)
+        {
+            var commodities = Values(dbm, "m_kCFG_ShopCommodityConfig");
+            if (commodities == null) return 0;
+            int changed = 0;
+            for (long id = HuntingShopFirstCommodity; id <= HuntingShopLastCommodity; id++)
+            {
+                var commodity = commodities.Obf_ruA<long, Obf_R.Obf_ff>(id);
+                var price = commodity?.Obf_RuA<Obf_R.Obf_ff>("_kItemPerPrice");
+                if (price == null) continue;
+                price.Obf_luA<long, object>(2, id <= 26110 ? 8_000L : 4_000L);
+                changed++;
+            }
+            return changed;
         }
 
         /// <summary>LC_ChatHelper.SendMsg(channelIndex, channelId, windowType, sendType, text, extra, checkCD).</summary>

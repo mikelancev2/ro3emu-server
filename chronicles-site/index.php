@@ -4,11 +4,18 @@ declare(strict_types=1);
 
 require __DIR__ . '/includes/csrf.php';
 $csrfToken = csrf_token();
-// Set once by auth/google-callback.php after a verified Google sign-in; read once and gone, nothing is
-// persisted beyond this single page load.
-$prefillEmail = $_SESSION['prefill_email'] ?? '';
-unset($_SESSION['prefill_email']);
+$authenticatedAt = (int) ($_SESSION['authenticated_at'] ?? 0);
+$loggedIn = is_string($_SESSION['account'] ?? null) && $authenticatedAt > time() - 43200;
+if (!$loggedIn) {
+    unset($_SESSION['account'], $_SESSION['authenticated_at']);
+}
+// A verified Google identity remains only until this registration succeeds. The account API receives its immutable
+// subject from the PHP session, never from a browser form field.
+$googleIdentity = $_SESSION['google_identity'] ?? null;
+$googleEmail = is_array($googleIdentity) && is_string($googleIdentity['email'] ?? null) ? $googleIdentity['email'] : '';
+$prefillEmail = $googleEmail;
 $openAccountModal = isset($_GET['open_account']) || isset($_GET['google_error']);
+$openLoginModal = isset($_GET['login']);
 $googleError = isset($_GET['google_error']);
 
 $config = require __DIR__ . '/site-config.php';
@@ -48,12 +55,21 @@ $copy = [
         'footer' => 'Uma nova aventura começa em breve.',
         'check' => 'Verificar', 'checking' => 'Verificando…', 'name_available' => 'Nome disponível.',
         'name_taken' => 'Esse nome já está em uso, escolha outro.', 'name_invalid' => 'Use 3–24 letras, números ou _.',
+        'account_taken' => 'Esse usuário ou e-mail já está vinculado a uma conta.',
         'google_button' => 'Entrar com Google', 'or_divider' => 'ou cadastre-se com usuário e senha',
         'password_mismatch' => 'As senhas não coincidem.',
         'register_success' => 'Conta criada! Baixe o launcher e entre com esse usuário e senha.',
         'register_error_generic' => 'Não foi possível criar a conta agora. Tente de novo em instantes.',
         'register_error_disabled' => 'Cadastro ainda não está disponível.',
         'google_error' => 'Não foi possível confirmar sua conta Google. Tente de novo ou cadastre-se com usuário e senha.',
+        'panel' => 'Painel', 'panel_label' => 'Sua conta Chronicles', 'panel_title' => 'Painel do <em>jogador.</em>',
+        'panel_copy' => 'Acompanhe seus personagens, saldos e novidades da loja.', 'characters' => 'Personagens', 'cash_shop' => 'Loja de cash', 'logout' => 'Sair',
+        'loading_profile' => 'Carregando seus personagens…', 'profile_error' => 'Não foi possível carregar o painel agora.', 'no_characters' => 'Você ainda não criou nenhum personagem.',
+        'level' => 'Nível', 'job_level' => 'Classe', 'paragon' => 'Paragon', 'last_login' => 'Último acesso', 'online_now' => 'Online', 'offline' => 'Offline', 'never' => 'Nunca',
+        'zeny' => 'Zeny', 'crystals' => 'Cristais', 'store_title' => 'Loja Chronicles', 'store_copy' => 'Os produtos já estão preparados. As compras serão abertas após a integração do pagamento seguro.',
+        'crystal_pack' => 'Pacotes de cristais', 'crystal_pack_copy' => 'Sacred Relic Crystals para usar nos sistemas disponíveis no jogo.',
+        'pass_one' => 'Passe I', 'pass_one_copy' => 'Acesso à trilha premium do primeiro passe.', 'pass_two' => 'Passe II', 'pass_two_copy' => 'Acesso à trilha premium do segundo passe.', 'coming_soon' => 'Em preparação',
+        'login_invalid' => 'Usuário ou senha incorretos.', 'login_error' => 'Não foi possível entrar agora. Tente novamente.', 'login_rate' => 'Muitas tentativas. Aguarde um momento.',
     ],
     'en' => [
         'nav_home' => 'Home', 'nav_news' => 'News', 'nav_classes' => 'Classes', 'nav_download' => 'Download', 'account' => 'Login',
@@ -75,12 +91,21 @@ $copy = [
         'footer' => 'A new adventure begins soon.',
         'check' => 'Check', 'checking' => 'Checking…', 'name_available' => 'Name available.',
         'name_taken' => 'That name is already taken, choose another.', 'name_invalid' => 'Use 3–24 letters, numbers or _.',
+        'account_taken' => 'That username or email is already linked to an account.',
         'google_button' => 'Sign in with Google', 'or_divider' => 'or sign up with a username and password',
         'password_mismatch' => 'Passwords do not match.',
         'register_success' => 'Account created! Download the launcher and log in with this username and password.',
         'register_error_generic' => "Couldn't create the account right now. Try again in a moment.",
         'register_error_disabled' => 'Registration is not available yet.',
         'google_error' => "Couldn't confirm your Google account. Try again or sign up with a username and password.",
+        'panel' => 'Panel', 'panel_label' => 'Your Chronicles account', 'panel_title' => 'Player <em>panel.</em>',
+        'panel_copy' => 'View your characters, balances, and shop updates.', 'characters' => 'Characters', 'cash_shop' => 'Cash shop', 'logout' => 'Sign out',
+        'loading_profile' => 'Loading your characters…', 'profile_error' => "Couldn't load the panel right now.", 'no_characters' => "You haven't created a character yet.",
+        'level' => 'Level', 'job_level' => 'Job', 'paragon' => 'Paragon', 'last_login' => 'Last login', 'online_now' => 'Online', 'offline' => 'Offline', 'never' => 'Never',
+        'zeny' => 'Zeny', 'crystals' => 'Crystals', 'store_title' => 'Chronicles shop', 'store_copy' => 'Products are ready. Purchases will open after secure payment integration.',
+        'crystal_pack' => 'Crystal packs', 'crystal_pack_copy' => 'Sacred Relic Crystals for the systems available in game.',
+        'pass_one' => 'Pass I', 'pass_one_copy' => 'Access to the first pass premium track.', 'pass_two' => 'Pass II', 'pass_two_copy' => 'Access to the second pass premium track.', 'coming_soon' => 'Coming soon',
+        'login_invalid' => 'Incorrect username or password.', 'login_error' => "Couldn't sign in right now. Try again.", 'login_rate' => 'Too many attempts. Please wait a moment.',
     ],
     'es' => [
         'nav_home' => 'Inicio', 'nav_news' => 'Novedades', 'nav_classes' => 'Clases', 'nav_download' => 'Descargar', 'account' => 'Login',
@@ -102,12 +127,21 @@ $copy = [
         'footer' => 'Una nueva aventura comienza pronto.',
         'check' => 'Verificar', 'checking' => 'Verificando…', 'name_available' => 'Nombre disponible.',
         'name_taken' => 'Ese nombre ya está en uso, elige otro.', 'name_invalid' => 'Usa 3–24 letras, números o _.',
+        'account_taken' => 'Ese usuario o correo ya está vinculado a una cuenta.',
         'google_button' => 'Iniciar sesión con Google', 'or_divider' => 'o regístrate con usuario y contraseña',
         'password_mismatch' => 'Las contraseñas no coinciden.',
         'register_success' => 'Cuenta creada. Descarga el launcher e inicia sesión con este usuario y contraseña.',
         'register_error_generic' => 'No se pudo crear la cuenta ahora. Inténtalo de nuevo en un momento.',
         'register_error_disabled' => 'El registro todavía no está disponible.',
         'google_error' => 'No se pudo confirmar tu cuenta de Google. Inténtalo de nuevo o regístrate con usuario y contraseña.',
+        'panel' => 'Panel', 'panel_label' => 'Tu cuenta Chronicles', 'panel_title' => 'Panel del <em>jugador.</em>',
+        'panel_copy' => 'Consulta tus personajes, saldos y novedades de la tienda.', 'characters' => 'Personajes', 'cash_shop' => 'Tienda de cash', 'logout' => 'Salir',
+        'loading_profile' => 'Cargando tus personajes…', 'profile_error' => 'No se pudo cargar el panel ahora.', 'no_characters' => 'Todavía no has creado ningún personaje.',
+        'level' => 'Nivel', 'job_level' => 'Clase', 'paragon' => 'Paragon', 'last_login' => 'Último acceso', 'online_now' => 'Online', 'offline' => 'Offline', 'never' => 'Nunca',
+        'zeny' => 'Zeny', 'crystals' => 'Cristales', 'store_title' => 'Tienda Chronicles', 'store_copy' => 'Los productos están preparados. Las compras se abrirán después de integrar el pago seguro.',
+        'crystal_pack' => 'Paquetes de cristales', 'crystal_pack_copy' => 'Sacred Relic Crystals para usar en los sistemas disponibles en el juego.',
+        'pass_one' => 'Pase I', 'pass_one_copy' => 'Acceso a la ruta premium del primer pase.', 'pass_two' => 'Pase II', 'pass_two_copy' => 'Acceso a la ruta premium del segundo pase.', 'coming_soon' => 'En preparación',
+        'login_invalid' => 'Usuario o contraseña incorrectos.', 'login_error' => 'No se pudo iniciar sesión ahora. Inténtalo de nuevo.', 'login_rate' => 'Demasiados intentos. Espera un momento.',
     ],
 ][$language];
 
@@ -138,6 +172,7 @@ function h(string $value): string
             <a href="#news"><?= h($copy['nav_news']) ?></a>
             <a href="#classes"><?= h($copy['nav_classes']) ?></a>
             <a href="#download"><?= h($copy['nav_download']) ?></a>
+            <?php if ($loggedIn): ?><a class="mobile-account-entry" href="panel.php?lang=<?= h($language) ?>"><?= h($copy['panel']) ?></a><?php else: ?><button class="mobile-account-entry" type="button" data-account-entry><?= h($copy['account']) ?></button><?php endif; ?>
             <details class="language-menu mobile-language-menu">
                 <summary aria-label="<?= h($languageMenuLabel) ?>"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.8 12h16.4M12 3.5c2.1 2.3 3.2 5.1 3.2 8.5S14.1 18.2 12 20.5M12 3.5C9.9 5.8 8.8 8.6 8.8 12s1.1 6.2 3.2 8.5"></path></svg><span><?= h(strtoupper($language)) ?></span><i aria-hidden="true"></i></summary>
                 <div class="language-options"><?php foreach ($languages as $code => $label): ?><a class="<?= $code === $language ? 'selected' : '' ?>" href="?lang=<?= h($code) ?>" lang="<?= h($code) ?>" hreflang="<?= h($code) ?>"<?= $code === $language ? ' aria-current="page"' : '' ?>><span><?= h(strtoupper($code)) ?></span><strong><?= h($label) ?></strong><b aria-hidden="true"><?= $code === $language ? '✓' : '' ?></b></a><?php endforeach; ?></div>
@@ -148,7 +183,7 @@ function h(string $value): string
                 <summary aria-label="<?= h($languageMenuLabel) ?>"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.8 12h16.4M12 3.5c2.1 2.3 3.2 5.1 3.2 8.5S14.1 18.2 12 20.5M12 3.5C9.9 5.8 8.8 8.6 8.8 12s1.1 6.2 3.2 8.5"></path></svg><span><?= h(strtoupper($language)) ?></span><i aria-hidden="true"></i></summary>
                 <div class="language-options"><?php foreach ($languages as $code => $label): ?><a class="<?= $code === $language ? 'selected' : '' ?>" href="?lang=<?= h($code) ?>" lang="<?= h($code) ?>" hreflang="<?= h($code) ?>"<?= $code === $language ? ' aria-current="page"' : '' ?>><span><?= h(strtoupper($code)) ?></span><strong><?= h($label) ?></strong><b aria-hidden="true"><?= $code === $language ? '✓' : '' ?></b></a><?php endforeach; ?></div>
             </details>
-            <button class="fantasy-button small" type="button" data-open-login><span><?= h($copy['account']) ?></span></button>
+            <?php if ($loggedIn): ?><a class="fantasy-button small" href="panel.php?lang=<?= h($language) ?>"><span><?= h($copy['panel']) ?></span></a><?php else: ?><button class="fantasy-button small" type="button" data-account-entry><span><?= h($copy['account']) ?></span></button><?php endif; ?>
         </div>
     </header>
 
@@ -203,15 +238,15 @@ function h(string $value): string
 
     <dialog class="account-modal" aria-labelledby="account-title"<?= $openAccountModal ? ' data-auto-open' : '' ?>><div class="modal-glow" aria-hidden="true"></div><button class="modal-close" type="button" data-close-account aria-label="<?= h($copy['close']) ?>">×</button><div class="modal-crest">✦</div><p class="eyebrow"><?= h($copy['modal_label']) ?></p><h2 id="account-title"><?= $copy['modal_title'] ?></h2><p class="modal-copy"><?= h($copy['modal_copy']) ?></p>
     <?php if ($config['google_client_id'] !== '' && $config['google_redirect_uri'] !== ''): ?>
-    <a class="glass-button google-button" href="auth/google.php"><span class="button-label"><?= h($copy['google_button']) ?></span></a>
+    <a class="glass-button google-button" href="auth/google.php"><img src="assets/images/google-g.svg" alt="" aria-hidden="true"><span><?= h($copy['google_button']) ?></span></a>
     <p class="or-divider"><?= h($copy['or_divider']) ?></p>
     <?php endif; ?>
     <?php if ($googleError): ?>
     <p class="form-message status-error"><?= h($copy['google_error']) ?></p>
     <?php endif; ?>
-    <form method="post" data-account-ready="<?= $config['accounts_api'] !== '' ? 'true' : 'false' ?>" data-register-url="api/register.php" data-check-url="api/check-username.php">
+    <form method="post" data-account-ready="<?= $config['accounts_api'] !== '' ? 'true' : 'false' ?>" data-register-url="api/register.php" data-check-url="api/check-username.php" data-panel-url="panel.php?lang=<?= h($language) ?>">
         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-        <label><?= h($copy['email']) ?><span><input name="email" type="email" autocomplete="email" value="<?= h($prefillEmail) ?>" required></span></label>
+        <label><?= h($copy['email']) ?><span><input name="email" type="email" autocomplete="email" value="<?= h($prefillEmail) ?>"<?= $googleEmail !== '' ? ' readonly' : '' ?> required></span></label>
         <label><?= h($copy['username']) ?><span><input name="username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" value="<?= $prefillEmail !== '' ? h(explode('@', $prefillEmail)[0]) : '' ?>" required></span></label>
         <p class="username-status" data-username-status role="status"></p>
         <div class="form-row"><label><?= h($copy['password']) ?><span><input name="password" type="password" autocomplete="new-password" minlength="8" required></span></label><label><?= h($copy['confirm']) ?><span><input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" required></span></label></div>
@@ -220,14 +255,23 @@ function h(string $value): string
         <p class="form-message" data-form-message role="status"></p>
         <p class="form-note" role="status"><?= h($copy['form_notice']) ?></p>
     </form></dialog>
-    <dialog class="account-modal login-modal" aria-labelledby="login-title"><div class="modal-glow" aria-hidden="true"></div><button class="modal-close" type="button" data-close-login aria-label="<?= h($copy['close']) ?>">×</button><div class="modal-crest">✦</div><p class="eyebrow"><?= h($copy['login_label']) ?></p><h2 id="login-title"><?= $copy['login_title'] ?></h2><p class="modal-copy"><?= h($copy['login_copy']) ?></p>
-        <form data-login-form><label><?= h($copy['username']) ?><span><input name="username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" required></span></label><label><?= h($copy['password']) ?><span><input name="password" type="password" autocomplete="current-password" minlength="8" required></span></label><button class="fantasy-button modal-submit" type="submit"><span><?= h($copy['login_submit']) ?></span><b>→</b></button><p class="form-message" data-login-message role="status"></p><div class="modal-links"><button type="button" data-forgot-password><?= h($copy['forgot_password']) ?></button><span><?= h($copy['no_account']) ?> <button type="button" data-open-account><?= h($copy['create_account']) ?></button></span></div><p class="form-note" data-login-note><?= h($copy['login_notice']) ?></p></form></dialog>
+    <dialog class="account-modal login-modal" aria-labelledby="login-title"<?= $openLoginModal ? ' data-auto-open' : '' ?>><div class="modal-glow" aria-hidden="true"></div><button class="modal-close" type="button" data-close-login aria-label="<?= h($copy['close']) ?>">×</button><div class="modal-crest">✦</div><p class="eyebrow"><?= h($copy['login_label']) ?></p><h2 id="login-title"><?= $copy['login_title'] ?></h2><p class="modal-copy"><?= h($copy['login_copy']) ?></p>
+    <?php if ($config['google_client_id'] !== '' && $config['google_redirect_uri'] !== ''): ?>
+        <a class="glass-button google-button" href="auth/google.php"><img src="assets/images/google-g.svg" alt="" aria-hidden="true"><span><?= h($copy['google_button']) ?></span></a>
+        <p class="or-divider"><?= h($copy['or_divider']) ?></p>
+    <?php endif; ?>
+        <form data-login-form data-login-url="api/login.php" data-panel-url="panel.php?lang=<?= h($language) ?>"><input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>"><label><?= h($copy['username']) ?><span><input name="username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" required></span></label><label><?= h($copy['password']) ?><span><input name="password" type="password" autocomplete="current-password" minlength="8" required></span></label><button class="fantasy-button modal-submit" type="submit"><span><?= h($copy['login_submit']) ?></span><b>→</b></button><p class="form-message" data-login-message role="status"></p><div class="modal-links"><button type="button" data-forgot-password><?= h($copy['forgot_password']) ?></button><span><?= h($copy['no_account']) ?> <button type="button" data-open-account><?= h($copy['create_account']) ?></button></span></div><p class="form-note" data-login-note><?= h($copy['login_notice']) ?></p></form></dialog>
     <script>window.CHRONICLES_I18N = <?= json_encode([
         'check' => $copy['check'], 'checking' => $copy['checking'], 'nameAvailable' => $copy['name_available'],
-        'nameTaken' => $copy['name_taken'], 'nameInvalid' => $copy['name_invalid'], 'passwordMismatch' => $copy['password_mismatch'],
+        'nameTaken' => $copy['name_taken'], 'nameInvalid' => $copy['name_invalid'], 'accountTaken' => $copy['account_taken'], 'passwordMismatch' => $copy['password_mismatch'],
         'registerSuccess' => $copy['register_success'], 'registerErrorGeneric' => $copy['register_error_generic'],
         'registerErrorDisabled' => $copy['register_error_disabled'], 'loginNotice' => $copy['login_notice'], 'forgotPasswordNotice' => $copy['forgot_password_notice'],
+        'panel' => $copy['panel'], 'account' => $copy['account'], 'loadingProfile' => $copy['loading_profile'], 'profileError' => $copy['profile_error'],
+        'noCharacters' => $copy['no_characters'], 'level' => $copy['level'], 'jobLevel' => $copy['job_level'], 'paragon' => $copy['paragon'],
+        'lastLogin' => $copy['last_login'], 'onlineNow' => $copy['online_now'], 'offline' => $copy['offline'], 'never' => $copy['never'],
+        'zeny' => $copy['zeny'], 'crystals' => $copy['crystals'], 'loginInvalid' => $copy['login_invalid'], 'loginError' => $copy['login_error'], 'loginRate' => $copy['login_rate'],
     ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;</script>
+    <script>window.CHRONICLES_AUTHENTICATED = <?= $loggedIn ? 'true' : 'false' ?>;</script>
     <script src="assets/vendor/gsap/gsap.min.js?v=3.15.0"></script>
     <script src="assets/vendor/gsap/ScrollTrigger.min.js?v=3.15.0"></script>
     <script src="assets/js/site.js?v=<?= h($assetVersion) ?>"></script>

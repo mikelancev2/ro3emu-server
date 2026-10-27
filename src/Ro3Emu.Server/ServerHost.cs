@@ -115,6 +115,7 @@ public static class ServerHost
         builder.Services.AddSingleton<GenreService>();
         builder.Services.AddSingleton<PowerService>();
         builder.Services.AddSingleton<Game.MailService>();
+        builder.Services.AddSingleton<DonationStore>();
         builder.Services.AddSingleton<AuctionService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<AuctionService>());
         builder.Services.AddSingleton<MarketStore>();

@@ -30,13 +30,25 @@ if (!csrf_verify($_POST['csrf_token'] ?? null)) {
 }
 
 $name = trim((string) ($_POST['username'] ?? ''));
+$email = strtolower(trim((string) ($_POST['email'] ?? '')));
 $password = (string) ($_POST['password'] ?? '');
 $confirmation = (string) ($_POST['password_confirmation'] ?? '');
+$google = $_SESSION['google_identity'] ?? null;
+$googleSubject = null;
+if (is_array($google) && ($google['provider'] ?? null) === 'google' && is_string($google['subject'] ?? null)
+    && is_string($google['email'] ?? null) && preg_match('/^[A-Za-z0-9_-]{1,255}$/', $google['subject'])
+    && filter_var($google['email'], FILTER_VALIDATE_EMAIL)) {
+    $googleSubject = $google['subject'];
+    $email = strtolower($google['email']);
+}
 
 if (!preg_match('/^[A-Za-z0-9_]{3,24}$/', $name)) {
     respond(400, ['ok' => false, 'error' => 'bad_name']);
 }
-if (strlen($password) < 8) {
+if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 254) {
+    respond(400, ['ok' => false, 'error' => 'bad_email']);
+}
+if (strlen($password) < 8 || strlen($password) > 256) {
     respond(400, ['ok' => false, 'error' => 'bad_password']);
 }
 if (!hash_equals($password, $confirmation)) {
@@ -46,7 +58,12 @@ if (!hash_equals($password, $confirmation)) {
 $ch = curl_init(rtrim($config['accounts_api'], '/') . '/register');
 curl_setopt_array($ch, [
     CURLOPT_POST => true,
-    CURLOPT_POSTFIELDS => http_build_query(['name' => $name, 'password' => $password]),
+    CURLOPT_POSTFIELDS => http_build_query([
+        'name' => $name,
+        'email' => $email,
+        'password' => $password,
+        'google_subject' => $googleSubject ?? '',
+    ]),
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_TIMEOUT => 10,
 ]);
@@ -56,6 +73,14 @@ curl_close($ch);
 
 if ($response === false || $status === 0) {
     respond(502, ['ok' => false, 'error' => 'server_unreachable']);
+}
+
+$body = is_string($response) ? json_decode($response, true) : null;
+if ($status === 200 && is_array($body) && ($body['ok'] ?? false) === true && is_string($body['account'] ?? null)) {
+    session_regenerate_id(true);
+    $_SESSION['account'] = $body['account'];
+    $_SESSION['authenticated_at'] = time();
+    unset($_SESSION['google_identity']);
 }
 
 http_response_code($status);

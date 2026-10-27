@@ -295,8 +295,11 @@ public sealed class VoiceOptions
 /// <summary>Both off by default so the tests keep the original's pass; a realm turns them on (docs/systems/activities-battlepass-monthcard.md).</summary>
 public sealed class PassOptions
 {
-    /// <summary>Every role gets the premium track and its privileges without the premium item 703.</summary>
+    /// <summary>Every role gets every premium track without consuming its configured entitlement item.</summary>
     public bool FreePremium { get; set; }
+
+    /// <summary>Specific pass activities whose premium track is free while <see cref="FreePremium"/> is off.</summary>
+    public long[] FreePremiumActivities { get; set; } = [];
 
     /// <summary>Pass EXP from play: challenges, daily activity, monsters, dungeons, MVPs and story (NewActivityService.PassPlay).</summary>
     public bool Play { get; set; }

@@ -60,8 +60,12 @@ public sealed partial class DungeonTests : IAsyncLifetime
 
     private async Task<BotClient> InWorld(string name, bool create = true)
     {
+        string account = name.ToLowerInvariant();
+        var accounts = Service<AccountStore>();
+        if (!await accounts.NameExistsAsync(account))
+            Assert.True(await accounts.RegisterAsync(account, "pw", $"{account}@example.test"));
         var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
-        await bot.LoginAsync(name.ToLowerInvariant(), "pw");
+        await bot.LoginAsync(account, "pw");
         await bot.EnterGateAsync();
         long id = create ? (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id : bot.Roles.Single().Id;
         await bot.EnterWorldAsync(id);

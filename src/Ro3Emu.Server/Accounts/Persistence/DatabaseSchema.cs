@@ -9,6 +9,7 @@ internal static class DatabaseSchema
 {
     internal static DbPlan[] Plans() =>
     [
+        new AccountSchemaPlan(),
         new RoleSchemaPlan(),
         new ItemSchemaPlan(),
         new FriendSchemaPlan(),
@@ -31,5 +32,6 @@ internal static class DatabaseSchema
         new TerritorySchemaPlan(RealmStateKind.GuildLeague),
         new TimedBattleSchemaPlan(),
         new CasualBattleSchemaPlan(),
+        new DonationSchemaPlan(),
     ];
 }

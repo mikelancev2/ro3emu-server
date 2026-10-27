@@ -217,7 +217,6 @@ function openModal(modal) {
 }
 
 document.querySelectorAll('[data-open-account]').forEach((button) => button.addEventListener('click', () => openModal(accountModal)));
-document.querySelectorAll('[data-open-login]').forEach((button) => button.addEventListener('click', () => openModal(loginModal)));
 
 function closeAccountModal() {
     accountModal?.close();
@@ -239,10 +238,13 @@ loginModal?.addEventListener('close', () => document.body.classList.remove('moda
 loginModal?.addEventListener('click', (event) => {
     if (event.target === loginModal) closeLoginModal();
 });
-
 if (accountModal?.hasAttribute('data-auto-open')) {
     document.body.classList.add('modal-open');
     accountModal.showModal();
+}
+if (loginModal?.hasAttribute('data-auto-open')) {
+    document.body.classList.add('modal-open');
+    loginModal.showModal();
 }
 
 const registrationForm = accountModal?.querySelector('form');
@@ -264,10 +266,33 @@ function setStatus(element, text, kind) {
 const loginForm = loginModal?.querySelector('[data-login-form]');
 const loginMessage = loginForm?.querySelector('[data-login-message]');
 const forgotPasswordButton = loginModal?.querySelector('[data-forgot-password]');
+const accountEntryButtons = document.querySelectorAll('[data-account-entry]');
 
-loginForm?.addEventListener('submit', (event) => {
+accountEntryButtons.forEach((button) => button.addEventListener('click', () => {
+    navigation?.classList.remove('open');
+    openModal(loginModal);
+}));
+
+loginForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    setStatus(loginMessage, i18n.loginNotice ?? '', 'status-ok');
+    const submitButton = loginForm.querySelector('.modal-submit');
+    if (submitButton) submitButton.disabled = true;
+    setStatus(loginMessage, '', null);
+    try {
+        const response = await fetch(loginForm.dataset.loginUrl, { method: 'POST', body: new FormData(loginForm) });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+            const message = response.status === 429 ? i18n.loginRate : response.status === 401 ? i18n.loginInvalid : i18n.loginError;
+            setStatus(loginMessage, message ?? '', 'status-error');
+            return;
+        }
+        loginForm.reset();
+        window.location.assign(loginForm.dataset.panelUrl || 'panel.php');
+    } catch {
+        setStatus(loginMessage, i18n.loginError ?? '', 'status-error');
+    } finally {
+        if (submitButton) submitButton.disabled = false;
+    }
 });
 
 forgotPasswordButton?.addEventListener('click', () => {
@@ -313,10 +338,11 @@ registrationForm?.addEventListener('submit', async (event) => {
         const response = await fetch(registrationForm.dataset.registerUrl, { method: 'POST', body: new FormData(registrationForm) });
         const data = await response.json();
         if (data.ok) {
-            setStatus(formMessage, i18n.registerSuccess ?? '', 'status-ok');
             registrationForm.reset();
+            window.location.assign(registrationForm.dataset.panelUrl || 'panel.php');
         } else {
-            setStatus(formMessage, data.error === 'name_taken' ? (i18n.nameTaken ?? '') : (i18n.registerErrorGeneric ?? ''), 'status-error');
+            const conflict = data.error === 'name_taken' || data.error === 'name_or_email_taken';
+            setStatus(formMessage, conflict ? (i18n.accountTaken ?? i18n.nameTaken ?? '') : (i18n.registerErrorGeneric ?? ''), 'status-error');
         }
     } catch {
         setStatus(formMessage, i18n.registerErrorGeneric ?? '', 'status-error');

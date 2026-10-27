@@ -498,6 +498,29 @@ public sealed partial class AccountStore : IDisposable
     }
     public async Task<LoginResult> LoginAsync(string name, string password) => (await SignInAsync(name, password).ConfigureAwait(false)).Result;
 
+    /// <summary>Create an account only for the website registration endpoint. Game login never calls this method.</summary>
+    public async Task<bool> RegisterAsync(string name, string password, string email)
+        => await RegisterAsync(name, password, email, provider: null, subject: null).ConfigureAwait(false);
+
+    /// <summary>Creates a website account and, when supplied by a loopback identity provider flow, binds its immutable subject.</summary>
+    public async Task<bool> RegisterAsync(string name, string password, string email, string? provider, string? subject)
+    {
+        email = email.Trim().ToLowerInvariant();
+        if (email.Length is < 3 or > 254 || !System.Net.Mail.MailAddress.TryCreate(email, out var parsed)
+            || !string.Equals(parsed.Address, email, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if ((provider is null) != (subject is null) || provider?.Length is > 32 || subject?.Length is > 255)
+            return false;
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
+        byte[] hash = await Task.Run(() => AccountHash.Hash(password, salt)).ConfigureAwait(false);
+        return await WriteAsync<bool>(new AccountRegisterPlan(name, hash, salt,
+            DateTime.UtcNow.ToString("O"), email, provider, subject)).ConfigureAwait(false);
+    }
+
+    /// <summary>Resolves a website identity to the stored canonical account name, or null when it has not registered yet.</summary>
+    public async Task<string?> ExternalIdentityAccountAsync(string provider, string subject) =>
+        await ReadAsync<string?>(new AccountIdentityRead(provider, subject)).ConfigureAwait(false);
+
     /// <summary>
     /// Login or first-time registration. <see cref="SignIn.Account"/> is the account's stored name, which can differ
     /// from <paramref name="name"/> in letter case; tokens and sessions must carry it, never the typed spelling.

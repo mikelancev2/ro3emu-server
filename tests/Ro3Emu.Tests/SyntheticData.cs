@@ -72,8 +72,12 @@ public sealed class SyntheticHost : IAsyncDisposable
     /// a new role, or with <paramref name="create"/> false the account's only one.</summary>
     public async Task<BotClient> InWorldAsync(string name, bool create = true)
     {
+        string account = name.ToLowerInvariant();
+        var accounts = Service<Ro3Emu.Server.Accounts.AccountStore>();
+        if (!await accounts.NameExistsAsync(account))
+            Assert.True(await accounts.RegisterAsync(account, "pw", $"{account}@example.test"));
         var bot = NewBot();
-        await bot.LoginAsync(name.ToLowerInvariant(), "pw");
+        await bot.LoginAsync(account, "pw");
         await bot.EnterGateAsync();
         long role = create ? (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id : bot.Roles.Single().Id;
         await bot.EnterWorldAsync(role);

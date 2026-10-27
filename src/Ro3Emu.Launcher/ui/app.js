@@ -127,7 +127,7 @@
         break;
       case "server":
         $("server").className = "server " + (m.online ? "on" : "off");
-        $("server-text").innerHTML = m.online ? "<b>Online</b>" + (m.players != null ? " · " + m.players + (m.players === 1 ? " player" : " players") : "") : "<b>Offline</b>";
+        $("server-text").innerHTML = m.online ? "<b>Online</b>" : "<b>Offline</b>";
         break;
       case "settings":
         $("set-dir").textContent = m.dir;
