@@ -15,6 +15,29 @@ namespace Ro3Emu.Tests;
 /// </summary>
 public sealed partial class DungeonTests
 {
+    [ClientDataFact]
+    public async Task APartyMembersStoryRegionStartsPreparationThroughTheLeader()
+    {
+        const long outside = 10153, scene = 3120402, task = 10106270, regionId = 1010626001;
+        await using var leader = await InWorld("Alice");
+        await using var member = await InWorld("Bob");
+        await MovePublic(leader, outside);
+        await MovePublic(member, outside);
+        await Party(leader, member);
+        await Gm(member, $"!quest accept {task}");
+        var region = Service<WorldData>().Map(outside)!.Regions[regionId];
+
+        using var leaderReady = leader.Inbox.Expect(e => e.IsGame(DungeonService.ReadyQueue));
+        using var memberReady = member.Inbox.Expect(e => e.IsGame(DungeonService.ReadyQueue));
+        await OnLoop(async () => Assert.True(await Service<DungeonService>().EnterFromRegionAsync(Session(member), region)));
+        var ready = TeamEnterReadyQueueNotify.Parser.ParseFrom((await memberReady.WaitAsync(Wait)).Body);
+        await leaderReady.WaitAsync(Wait);
+
+        Assert.Equal(scene, ready.DungeonId);
+        Assert.True(ready.ReadyQueue[(long)leader.Self!.Uuid]);
+        Assert.False(ready.ReadyQueue[(long)member.Self!.Uuid]);
+    }
+
     public static TheoryData<long> ScriptedScenes() => new(new ReconstructedDungeons(
         Options.Create(new ServerOptions())).AllScripted.Select(s => s.Scene).Order());
 
