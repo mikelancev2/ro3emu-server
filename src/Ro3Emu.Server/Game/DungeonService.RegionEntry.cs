@@ -27,8 +27,21 @@ public sealed partial class DungeonService
         long task = parts.Length >= 4 && long.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out long t) ? t : 0;
         if (task != 0 && !(s.Tasks?.Infos.TryGetValue(task, out var info) == true && info.Status is TaskState.Running or TaskState.Finish))
             return false;
-        _log.LogInformation("{Name} enters region {Region}: dungeon {Scene} for task {Task}", s.Role?.Name, region.Id, scene, task);
-        await EnterAsync(s, new EnterDungeonReq { SceneEntry = scene });
+        var initiator = RegionEntryInitiator(s);
+        _log.LogInformation("{Name} enters region {Region}: dungeon {Scene} for task {Task}, initiated by {Initiator}",
+            s.Role?.Name, region.Id, scene, task, initiator.Role?.Name);
+        await EnterAsync(initiator, new EnterDungeonReq { SceneEntry = scene });
         return true;
+    }
+
+    /// <summary>
+    /// A server-hosted region has no leader-side 30400 request to fall back to. Route a member's valid story trigger
+    /// through the online leader so ordinary party preparation and its leader permission remain authoritative (inferred).
+    /// </summary>
+    private GameSession RegionEntryInitiator(GameSession s)
+    {
+        if (s.Role == null) return s;
+        long leader = _teams.TeamOf(s.Role.Id).Leader;
+        return leader == s.Role.Id ? s : _sessions.All().FirstOrDefault(p => p.Role?.Id == leader) ?? s;
     }
 }

@@ -2,6 +2,26 @@ namespace Ro3Emu.Tests;
 
 public sealed class ChatSubscriptionTests
 {
+    [Fact]
+    public async Task ImmediateChatRetransmissionIsAcknowledgedButNotRepublished()
+    {
+        await using var host = await SyntheticHost.StartAsync();
+        await using var alice = await host.InWorldAsync("Alice");
+        await using var bob = await host.InWorldAsync("Bob");
+        const string channel = "@TGS#_1_0", text = "only once";
+        await alice.JoinChatAsync(channel);
+        await bob.JoinChatAsync(channel);
+
+        await alice.SendChatAsync(channel, 2, text);
+        Assert.Equal(text, (await alice.NextChatLineAsync()).Content);
+        Assert.Equal(text, (await bob.NextChatLineAsync()).Content);
+
+        await alice.SendChatAsync(channel, 2, text);
+        alice.Timeout = bob.Timeout = TimeSpan.FromMilliseconds(300);
+        await Assert.ThrowsAsync<TimeoutException>(() => alice.NextChatLineAsync());
+        await Assert.ThrowsAsync<TimeoutException>(() => bob.NextChatLineAsync());
+    }
+
     [Theory]
     [InlineData("4_1")]
     [InlineData("@TGS#_1_0")]

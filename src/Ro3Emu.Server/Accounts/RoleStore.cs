@@ -667,6 +667,9 @@ public sealed class RoleStore(AccountStore accounts)
         return _accounts.ReadSync<RoleProgress>(new RoleProgressReadPlan(id));
     }
 
+    /// <summary>Read-only account/profile views must not occupy a request thread while the database reader is busy.</summary>
+    public Task<RoleProgress> LoadProgressAsync(long id) => _accounts.ReadAsync<RoleProgress>(new RoleProgressReadPlan(id));
+
     internal static RoleProgress ReadProgress(SqliteDataReader r)
     {
         var p = new RoleProgress

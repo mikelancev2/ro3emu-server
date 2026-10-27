@@ -76,7 +76,9 @@ public sealed partial class ChatService
     private readonly object _sync = new();
     private readonly Dictionary<string, HashSet<GameSession>> _groups = new();
     private readonly Dictionary<long, GameSession> _online = new();
+    private readonly Dictionary<(long Sender, string Target, uint Type, string Content, string Extra), DateTimeOffset> _recentSends = new();
     private long _nextMessageId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private static readonly TimeSpan RetransmitWindow = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// Server-origin recruitment uses the client's channel-8 Tencent text push. The special
@@ -318,6 +320,12 @@ public sealed partial class ChatService
             await DownAsync(sender, Cmd.SendText, new SendTextChatMessageResponse { ChatResult = false });
             return;
         }
+        if (IsRetransmission(sender, req))
+        {
+            // Acknowledge the client retry so it stops resending, but never publish a second visible line.
+            await DownAsync(sender, Cmd.SendText, new SendTextChatMessageResponse { ChatResult = true, Msg = message });
+            return;
+        }
         lock (_sync)
         {
             if (req.ChatType == ChatTypePrivate)
@@ -355,6 +363,22 @@ public sealed partial class ChatService
                 || to.SceneLoading || to.Handoff != null || to.WorldScene != runtime)) continue;
             try { await DownAsync(to, Cmd.NotifyNewText, push); }
             catch (Exception e) when (e is IOException or System.Net.Sockets.SocketException or ObjectDisposedException) { }
+        }
+    }
+
+    /// <summary>Clients retry an accepted IM frame after a transient tunnel acknowledgement loss. Keep a tiny,
+    /// instance-local window so one player line cannot fan out repeatedly to a world channel.</summary>
+    private bool IsRetransmission(GameSession sender, SendTextChatMessageRequest req)
+    {
+        var key = (sender.Role!.Id, req.ReceiveId, (uint)req.ChatType, req.Content ?? "", req.ExtraParam ?? "");
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        lock (_sync)
+        {
+            foreach (var expired in _recentSends.Where(entry => now - entry.Value > RetransmitWindow).Select(entry => entry.Key).ToArray())
+                _recentSends.Remove(expired);
+            if (_recentSends.TryGetValue(key, out var previous) && now - previous <= RetransmitWindow) return true;
+            _recentSends[key] = now;
+            return false;
         }
     }
 
