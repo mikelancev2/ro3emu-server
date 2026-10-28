@@ -50,7 +50,9 @@ public sealed class BattlePassActivityTests : IAsyncLifetime
 
     private async Task<BotClient> InWorld(string name, bool create = true)
     {
-        await Service<AccountStore>().SignInAsync(name.ToLowerInvariant(), "pw");
+        // BotClient.LoginAsync pads a short credential to 8 characters before it reaches the SDK; pre-registering with
+        // the same padded form keeps the stored hash matching what it actually sends.
+        await Service<AccountStore>().SignInAsync(name.ToLowerInvariant(), "pw000000");
         var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
         await bot.LoginAsync(name.ToLowerInvariant(), "pw"); await bot.EnterGateAsync();
         long id = create ? (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id : bot.Roles.Single().Id;

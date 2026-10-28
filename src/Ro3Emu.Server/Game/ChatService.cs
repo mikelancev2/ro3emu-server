@@ -76,7 +76,7 @@ public sealed partial class ChatService
     private readonly object _sync = new();
     private readonly Dictionary<string, HashSet<GameSession>> _groups = new();
     private readonly Dictionary<long, GameSession> _online = new();
-    private readonly Dictionary<(long Sender, string Target, uint Type, string Content, string Extra), DateTimeOffset> _recentSends = new();
+    private readonly Dictionary<(long Sender, string Target, uint Type, string Content, string Extra), DateTimeOffset> _recentSends = [];
     private long _nextMessageId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private static readonly TimeSpan RetransmitWindow = TimeSpan.FromSeconds(2);
 
@@ -374,8 +374,9 @@ public sealed partial class ChatService
         DateTimeOffset now = DateTimeOffset.UtcNow;
         lock (_sync)
         {
-            foreach (var expired in _recentSends.Where(entry => now - entry.Value > RetransmitWindow).Select(entry => entry.Key).ToArray())
-                _recentSends.Remove(expired);
+            (long, string, uint, string, string)[] expired =
+                [.. _recentSends.Where(entry => now - entry.Value > RetransmitWindow).Select(entry => entry.Key)];
+            foreach (var stale in expired) _recentSends.Remove(stale);
             if (_recentSends.TryGetValue(key, out var previous) && now - previous <= RetransmitWindow) return true;
             _recentSends[key] = now;
             return false;

@@ -74,8 +74,10 @@ public sealed class SyntheticHost : IAsyncDisposable
     {
         string account = name.ToLowerInvariant();
         var accounts = Service<Ro3Emu.Server.Accounts.AccountStore>();
+        // BotClient.LoginAsync pads a short credential to 8 characters before it reaches the SDK; pre-registering with
+        // the same padded form keeps the stored hash matching what it actually sends.
         if (!await accounts.NameExistsAsync(account))
-            Assert.True(await accounts.RegisterAsync(account, "pw", $"{account}@example.test"));
+            Assert.True(await accounts.RegisterAsync(account, "pw000000", $"{account}@example.test"));
         var bot = NewBot();
         await bot.LoginAsync(account, "pw");
         await bot.EnterGateAsync();

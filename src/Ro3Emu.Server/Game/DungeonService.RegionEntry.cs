@@ -9,6 +9,9 @@ public sealed partial class DungeonService
     /// <summary>ActionConfig 613 EnterDungeon_Sever, _iEXECHost 1 (data/config/ActionConfig.json).</summary>
     public const int RegionEnterDungeonAction = 613;
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "{Name} enters region {Region}: dungeon {Scene} for task {Task}, initiated by {Initiator}")]
+    private static partial void LogRegionEntry(ILogger logger, string? name, long region, long scene, long task, string? initiator);
+
     /// <summary>
     /// A scene-editor region whose action is "613|scene|1|task" enters that story dungeon. The client runs a region's
     /// first action itself only when ActionConfig marks it client-hosted; for any other action OnEnterArea returns false
@@ -28,8 +31,7 @@ public sealed partial class DungeonService
         if (task != 0 && !(s.Tasks?.Infos.TryGetValue(task, out var info) == true && info.Status is TaskState.Running or TaskState.Finish))
             return false;
         var initiator = RegionEntryInitiator(s);
-        _log.LogInformation("{Name} enters region {Region}: dungeon {Scene} for task {Task}, initiated by {Initiator}",
-            s.Role?.Name, region.Id, scene, task, initiator.Role?.Name);
+        LogRegionEntry(_log, s.Role?.Name, region.Id, scene, task, initiator.Role?.Name);
         await EnterAsync(initiator, new EnterDungeonReq { SceneEntry = scene });
         return true;
     }
