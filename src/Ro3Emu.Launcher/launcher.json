@@ -1,6 +1,8 @@
 {
-  // Ro3Emu.Patcher repository (static HTTP) and the channel this launcher follows. Point these at your own host
-  // (docs/guide/launcher.md); a launcher.json beside the exe overrides the built-in one.
+  // Built into the exe. "operator": a server's own launcher, with its "repository", "channel", "server", "serverName"
+  // and "links" (docs/guide/launcher.md); build it with -p:LauncherConfigFile=<your file> or put a launcher.json
+  // beside the exe.
+  "mode": "operator",
   "repository": "https://dl.chronicles.com.br/",
   "channel": "live",
   // The game server's HTTP base; the launcher pings it for the online pill.
