@@ -14,9 +14,6 @@ public static partial class SdkEndpoints
 {
     public const string LoginPath = "/sdk/login";
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "SDK login {Identity}: {Result}")]
-    private static partial void LogSdkLogin(ILogger logger, string identity, string result);
-
     public const string ServerListPath = "/serverlist/v2/168/serverlist.json";
 
     /// <summary>Plain-JSON marker understood by Lua_UT_Utils.Decrypt (otherwise it expects base64 AES).</summary>
@@ -42,9 +39,10 @@ public static partial class SdkEndpoints
             {
                 return Results.Json(new { code = 401 });
             }
-            string? account = await accounts.VerifiedAccountAsync(identity, credential);
-            LogSdkLogin(log, identity, account is null ? "Rejected" : "Ok");
-            if (account is null)
+            var (result, account) = await accounts.SignInAsync(identity, credential);
+            log.LogInformation("SDK login {Identity}: {Result}", account, result);
+            // A banned account answers like a wrong password (inferred: the client has no ban code we know).
+            if (result is AccountStore.LoginResult.BadPassword or AccountStore.LoginResult.Banned)
             {
                 return Results.Json(new { code = 401 });
             }

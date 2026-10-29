@@ -34,5 +34,6 @@ internal static class DatabaseSchema
         new CasualBattleSchemaPlan(),
         new DonationSchemaPlan(),
         new GiftCodeSchemaPlan(),
+        new AccountBanSchemaPlan(),
     ];
 }
