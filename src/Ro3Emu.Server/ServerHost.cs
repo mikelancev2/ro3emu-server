@@ -214,6 +214,8 @@ public static class ServerHost
         builder.Services.AddHostedService<ReconnectShutdownService>();
 
         builder.Services.AddSingleton<CredentialLimiter>();
+        builder.Services.AddSingleton<GiftCodeLimiter>();
+        builder.Services.AddSingleton<GiftCodeService>();
 
         var app = builder.Build();
         app.Lifetime.ApplicationStopping.Register(() => httpConnections.AbortAfter(HttpConnectionReaper.Grace));
@@ -236,6 +238,7 @@ public static class ServerHost
         });
         SdkEndpoints.Map(app);
         AccountEndpoints.Map(app);
+        GiftCodeEndpoints.Map(app);
         Diagnostics.MetricsEndpoints.Map(app);
         // Run a GM command as an online player (loopback only): POST /ro3emu/gm?account=tester body "!warp 10111 150 190".
         app.MapPost("/ro3emu/gm", async (HttpContext context, SessionRegistry sessions, GmCommands gm, GameLoop loop) =>
