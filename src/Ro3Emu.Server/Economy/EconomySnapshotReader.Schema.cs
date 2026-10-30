@@ -10,6 +10,8 @@ public static partial class EconomySnapshotReader
         ["auth_token"] = "token kind account expires_utc",
         ["website_donation"] = "order_id stripe_session_id stripe_payment_intent stripe_event_id account role_id package_id crystals amount_cents currency status created_utc paid_utc",
         ["account_ban"] = "account reason banned_utc until_utc banned_by",
+        ["admin_audit"] = "id utc admin action target detail",
+        ["panel_news"] = "id title body tag published_utc author pinned",
         ["role_lifecycle"] = "role_id epoch deleted",
         ["owner_revision"] = "kind id part revision",
         ["owner_operation_receipt"] = "operation_id family result",

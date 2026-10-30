@@ -77,7 +77,7 @@ internal static class InstallFlow
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RO3Emu/{typeof(InstallFlow).Assembly.GetName().Version}");
         var installer = new ClientInstaller(config, http, SetupHome.DownloadDir) { Log = SetupLog.Write };
 
-        Ui.Step("Asking the official servers for the current release");
+        Ui.Step("Asking Genesis' update servers for the current release");
         ClientInstaller.Manifests manifests;
         using (var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3)))
             manifests = await installer.FetchAsync(cts.Token);
@@ -201,6 +201,8 @@ internal sealed class OptionsWithClient(Options options, string client)
         if (o.Home != null) args.AddRange(["--home", o.Home]);
         args.AddRange(["--http-port", o.Ports.Http.ToString(), "--micro-port", o.Ports.MicroGate.ToString(), "--game-port", o.Ports.GameGate.ToString()]);
         if (o.Ports.Voice > 0) args.AddRange(["--voice-port", o.Ports.Voice.ToString()]);
+        if (o.Ports.Panel > 0) args.AddRange(["--panel-port", o.Ports.Panel.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+        else args.Add("--no-panel");
         if (o.PurchaseUrl != null) args.AddRange(["--purchase-url", o.PurchaseUrl]);
         return args.ToArray();
     }

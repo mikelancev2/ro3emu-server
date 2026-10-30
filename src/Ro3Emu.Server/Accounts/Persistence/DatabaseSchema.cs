@@ -35,5 +35,6 @@ internal static class DatabaseSchema
         new DonationSchemaPlan(),
         new GiftCodeSchemaPlan(),
         new AccountBanSchemaPlan(),
+        new PanelSchemaPlan(),
     ];
 }

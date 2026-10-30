@@ -97,7 +97,7 @@ internal static class Flows
         if (problems.Count == 0) return;
         var shown = string.Join("\n    ", problems.Take(6)) + (problems.Count > 6 ? $"\n    ... and {problems.Count - 6} more" : "");
         throw new SetupException($"This game folder does not fit this RO3Emu:\n    {shown}",
-            "Run RO3Emu.exe update to repair the game from the official servers. If it still fails, this game version is newer than " +
+            "Run RO3Emu.exe update to repair the game from Genesis' update servers. If it still fails, this game version is newer than " +
             "RO3Emu: get the latest RO3Emu from the releases page.");
     }
 
@@ -180,6 +180,8 @@ internal static class Flows
                 Ui.Info($"Windows may ask whether Ro3Emu.Server may use the network: allow it.");
                 Ui.Info($"For players outside your network, forward TCP ports {ServerProcess.PortList(local.Ports)} on your router");
                 Ui.Info("to this PC and start with --public <your public IP>.");
+                if (local.Ports.Panel > 0)
+                    Ui.Info($"Web panel for players and admins: http://{local.PublicHost}:{local.Ports.Panel} (docs/guide/panel.md).");
             }
             if (server != null) Program.OnClose = () => server.Stop(TimeSpan.FromSeconds(4));
             return await PlayAndWaitAsync(client, server, options.NoLaunch);
@@ -235,7 +237,7 @@ internal static class Flows
         {
             if (ServerProcess.BusyPort(ports) is { } busy)
                 throw new SetupException($"Port {busy} is already used by another program, so the server cannot start.",
-                    "Close the other program (or another RO3Emu window), or start with other ports, for example --http-port 5381 --micro-port 20001 --game-port 33101.");
+                    "Close the other program (or another RO3Emu window), or start with other ports, for example --http-port 5390 --micro-port 20001 --game-port 33102 --panel-port 5391 (or --no-panel).");
             server = ServerProcess.Start(serverExe, SetupHome.DataDir, ports, args, env);
             var watch = Stopwatch.StartNew();
             bool ready = await server.WaitReadyAsync(TimeSpan.FromMinutes(5),
@@ -372,7 +374,7 @@ internal static class Flows
             }
         }
         Ui.Ok($"the game now connects to {serverUrl} (RO3Emu.exe restore undoes this)");
-        Ui.Warn("Do not use the publisher's launcher to repair this game folder while playing on RO3Emu: it undoes the patch.");
+        Ui.Warn("Do not use the Genesis launcher to repair this game folder while playing on RO3Emu: it undoes the patch.");
     }
 
     /// <summary>Runs patcher code whose Console output belongs in the log, not on the player's screen.</summary>
@@ -468,7 +470,7 @@ internal static class Flows
         Ui.Title("RO3Emu - restore the game");
         var client = KnownClient(options) ?? throw new SetupException("No game folder is known.", "Run RO3Emu.exe restore --client \"<folder with ro3.exe>\".");
         Quiet(() => { ClientPatcher.Restore(client); return 0; });
-        Ui.Ok($"{client} is back to the original files: it talks to the official servers again.");
+        Ui.Ok($"{client} is back to the original files: it talks to Genesis' servers again.");
         return 0;
     }
 
