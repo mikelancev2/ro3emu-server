@@ -19,7 +19,9 @@ namespace Ro3Emu.Server.Http;
 /// </summary>
 public sealed partial class PanelBackend(IOptions<ServerOptions> options, AccountStore accounts, RankService ranks, GameData data,
     GameLoop loop, SessionRegistry sessions, ReconnectService reconnect, Diagnostics.SessionCensus census,
-    Diagnostics.ServerMetrics metrics, CredentialLimiter limiter, TimeProvider clock) : IPanelBackend
+    Diagnostics.ServerMetrics metrics, CredentialLimiter limiter, TimeProvider clock, StaffRoles staff,
+    TerritoryWarsService territory, MvpService mvp, TimedTodoSchedule todo, ActivityClock activities, SeasonService seasons,
+    TestingSwitches testing) : IPanelBackend
 {
     /// <summary>JobConfig 1000, Novice: the root of every class line (TrainingService.RootJob); its children are the classes.</summary>
     private const long Novice = 1000;
@@ -56,7 +58,7 @@ public sealed partial class PanelBackend(IOptions<ServerOptions> options, Accoun
 
     public bool TryAcquireCredentialCheck(IPAddress? remote) => limiter.TryAcquire(remote);
 
-    public bool IsAdmin(string account) => options.Value.GmAccounts.Contains(account, StringComparer.Ordinal);
+    public bool IsAdmin(string account) => staff.RoleOf(account) != PanelRole.None;
 
     public int PlayersOnline() => census.Current.Roles.Count;
 
@@ -98,7 +100,7 @@ public sealed partial class PanelBackend(IOptions<ServerOptions> options, Accoun
 
     public async Task<IReadOnlyList<PanelOnlineRole>> OnlineAsync() =>
         [.. (await OnlineRowsAsync()).OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(r => new PanelOnlineRole(r.Name, ClassName(r.Career), r.Level, MapName(r.Scene), r.Account))];
+            .Select(r => new PanelOnlineRole(r.Name, ClassName(r.Career), r.Level, MapName(r.Scene), r.Account, ClassIcon(r.Career), r.Scene))];
 
     /// <summary>The roles in the world, read on the loop where sessions change, at most once per <see cref="OnlineTtl"/>.</summary>
     private async Task<OnlineRow[]> OnlineRowsAsync()
@@ -127,7 +129,7 @@ public sealed partial class PanelBackend(IOptions<ServerOptions> options, Accoun
     public IReadOnlyList<PanelBoardInfo> Boards() => [.. BoardList.Select(b => b.Info)];
 
     public IReadOnlyList<PanelClass> Classes() =>
-        [.. JobConfig.All(data).Where(j => j.ParentId == Novice).OrderBy(j => j.Id).Select(j => new PanelClass(j.Id, ClassName(j.Id)))];
+        [.. JobConfig.All(data).Where(j => j.ParentId == Novice).OrderBy(j => j.Id).Select(j => new PanelClass(j.Id, ClassName(j.Id), ClassIcon(j.Id)))];
 
     public async Task<PanelBoard?> BoardAsync(string board, long rootClass)
     {
@@ -156,7 +158,7 @@ public sealed partial class PanelBackend(IOptions<ServerOptions> options, Accoun
             task = _levels;
         }
         return (await task).Where(r => InClass(r.Career, rootClass))
-            .Select(r => new PanelBoardRow(0, r.Name, ClassName(r.Career), r.Level, r.JobLevel));
+            .Select(r => new PanelBoardRow(0, r.Name, ClassName(r.Career), r.Level, r.JobLevel, ClassIcon(r.Career)));
     }
 
     /// <summary>A character board of RankService, its rows named from the role table; deleted characters drop out.</summary>
@@ -165,7 +167,7 @@ public sealed partial class PanelBackend(IOptions<ServerOptions> options, Accoun
         var top = await ranks.TopAsync(board, rootClass == 0 ? BoardSize : 3000);
         var names = await accounts.ReadAsync<Dictionary<long, (string Name, int Career, int Level)>>(new PanelRoleNamesRead([.. top.Select(t => t.Id)]));
         return top.Where(t => names.ContainsKey(t.Id) && InClass(names[t.Id].Career, rootClass))
-            .Select(t => new PanelBoardRow(0, names[t.Id].Name, ClassName(names[t.Id].Career), names[t.Id].Level, t.Score));
+            .Select(t => new PanelBoardRow(0, names[t.Id].Name, ClassName(names[t.Id].Career), names[t.Id].Level, t.Score, ClassIcon(names[t.Id].Career)));
     }
 
     private async Task<IEnumerable<PanelBoardRow>> GuildRowsAsync(int board)

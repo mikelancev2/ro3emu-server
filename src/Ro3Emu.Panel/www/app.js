@@ -137,14 +137,14 @@ function densityToggle() {
 }
 try { document.body.dataset.density = localStorage.getItem('ro3p-density') || 'compact'; } catch { document.body.dataset.density = 'compact'; }
 
-/** Breadcrumb, page title and the actions row: the top of every page. */
-function pageHead({ crumbs, title, big, after, subtitle, meta, actions }) {
+/** Breadcrumb, page title (after a picture, art) and the actions row: the top of every page. */
+function pageHead({ crumbs, title, big, art, after, subtitle, meta, actions }) {
   return h('header', { class: 'page-head' },
     h('div', { class: 'titles' },
       crumbs && h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' }, crumbs.map((c, i) => [
         i > 0 && h('span', { class: 'sep', 'aria-hidden': 'true' }, '/'),
         c.href ? link(c.href, null, c.label) : h('span', { 'aria-current': 'page' }, c.label)])),
-      h('div', { class: 'title-row' }, h('h1', { class: 'title' + (big ? ' big' : '') }, title), after),
+      h('div', { class: 'title-row' }, art, h('h1', { class: 'title' + (big ? ' big' : '') }, title), after),
       subtitle && h('p', { class: 'subtitle' }, subtitle),
       meta && h('dl', { class: 'meta' }, meta.map(([k, v]) => h('div', null, h('dt', null, k), h('dd', null, v))))),
     actions && h('div', { class: 'actions' }, actions));
@@ -210,11 +210,23 @@ function authControls(menu) {
     s?.registration ? link('/register', { class: 'btn accent sm' }, 'Sign up') : null];
 }
 
-function drawChrome() {
-  const s = state.session;
-  const name = s?.server?.name || 'RO3Emu';
+/** The server's branding (Ro3Emu:Panel:Branding): name, logo, footer and accent colour, each only when set. */
+function drawBrand(server) {
+  const name = server?.name || 'RO3Emu';
   document.getElementById('brand-name').textContent = name;
   document.getElementById('foot-name').textContent = name;
+  const logo = document.getElementById('brand-logo');
+  if (server?.logo && logo.getAttribute('src') !== server.logo) logo.src = server.logo;
+  logo.hidden = !server?.logo;
+  document.getElementById('brand-star').style.display = server?.logo ? 'none' : '';
+  if (server?.footer) document.getElementById('foot-text').textContent = server.footer;
+  // CSSOM, not a style attribute: the page's policy allows no inline style.
+  if (server?.accent) for (const token of ['--blue', '--blue-ink']) document.documentElement.style.setProperty(token, server.accent);
+}
+
+function drawChrome() {
+  const s = state.session;
+  drawBrand(s?.server);
   document.getElementById('nav-admin').hidden = !s?.admin;
   document.getElementById('auth').replaceChildren(...authControls(false).filter(Boolean));
   document.getElementById('menu-auth').replaceChildren(...authControls(true).filter(Boolean));
@@ -306,15 +318,16 @@ function failure(error) {
 
 // ---------------------------------------------------------------- shared tables
 
-const classCol = { label: 'Class', opt: true, value: r => r.class };
+/** A character's class with its emblem (pages/database.js thumb: a letter when the server has no picture). */
+const classCol = { label: 'Class', opt: true, value: r => r.class ? h('span', { class: 'named plain' }, thumb(r.classIcon, r.class, 'cls'), h('span', null, r.class)) : '' };
 const levelCol = { label: 'Level', num: true, value: r => num(r.level) };
 
 function onlineTable(players, admin, limit) {
   const rows = limit ? players.slice(0, limit) : players;
   return table([
-    { label: 'Name', grow: true, value: p => h('span', { class: 'strong' }, p.name) },
+    { label: 'Name', grow: true, value: p => link('/profiles/' + encodeURIComponent(p.name), { class: 'row-link' }, p.name) },
     classCol, levelCol,
-    { label: 'Map', opt: !limit, value: p => p.map },
+    { label: 'Map', opt: !limit, value: p => p.mapId ? link('/maps/' + p.mapId, { class: 'text-link' }, p.map) : p.map },
     admin && !limit && { label: 'Account', opt: true, value: p => link('/admin/accounts/' + encodeURIComponent(p.account), { class: 'text-link mono' }, p.account) },
   ].filter(Boolean), rows, { short: !!limit });
 }
@@ -324,7 +337,8 @@ function boardTable(board, limit) {
   const rows = limit ? board.rows.slice(0, limit) : board.rows;
   return table([
     { label: '#', value: r => h('span', { class: 'rank' + (r.rank <= 3 ? ' r' + r.rank : '') }, r.rank) },
-    { label: info.guild ? 'Guild' : 'Name', grow: true, value: r => h('span', { class: 'strong' }, r.name) },
+    { label: info.guild ? 'Guild' : 'Name', grow: true, value: r => info.guild ? h('span', { class: 'strong' }, r.name)
+      : link('/profiles/' + encodeURIComponent(r.name), { class: 'row-link' }, r.name) },
     !info.guild && classCol,
     { label: info.guild ? 'Guild level' : 'Level', num: true, value: r => num(r.level) },
     { label: info.score, num: true, value: r => num(r.score) },
@@ -339,7 +353,7 @@ async function homePage() {
   const s = state.session;
   const mine = s?.account ? await api('GET', '/api/account').catch(() => null) : null;
   const head = pageHead({
-    title: status.name, big: true, after: chip('online', 'Online'),
+    title: status.name, big: true, after: chip('online', 'Online'), subtitle: status.tagline,
     meta: [['Area', status.area], ['Version', mono(status.version || '-')], ['Started', stamp(status.startedUtc)]],
   });
   const kpis = h('section', { class: 'kpis', 'aria-label': 'Server figures' },
@@ -451,7 +465,10 @@ async function loginPage() {
     field('Account name', 'account', 'text', { autocomplete: 'username', maxlength: '64' }),
     field('Password', 'password', 'password', { autocomplete: 'current-password' })],
   'Log in', async values => {
-    adopt(await api('POST', '/api/login', { account: values.account, password: values.password }));
+    const result = await api('POST', '/api/login', { account: values.account, password: values.password });
+    // With two-factor authentication the password opens a code step (pages/account-security.js).
+    if (result.twoFactor) { render(twoFactorStep(result)); return; }
+    adopt(result);
     navigate(nextPath(), true);
     toast('Welcome back, ' + state.session.account + '.');
   }), state.session?.registration && ['New here? ', link('/register', null, 'Create an account')]);
@@ -478,14 +495,14 @@ async function registerPage() {
 function characterTable(characters, withId) {
   return table([
     withId && { label: 'ID', opt: true, value: c => mono(String(c.id)) },
-    { label: 'Name', grow: true, value: c => h('span', { class: 'strong' }, c.name) },
+    { label: 'Name', grow: true, value: c => link('/characters/' + c.id, { class: 'row-link' }, c.name) },
     classCol, levelCol,
     { label: 'Job', num: true, opt: true, value: c => num(c.jobLevel) },
     { label: 'Map', opt: true, value: c => c.map },
     { label: 'Guild', opt: true, value: c => c.guild || h('span', { class: 'muted' }, '-') },
     { label: 'Status', value: c => c.online ? chip('online', 'Online') : chip('', 'Offline') },
     { label: 'Last played', opt: true, value: c => stamp(c.lastLogin) },
-  ].filter(Boolean), characters);
+  ].filter(Boolean), characters, { onrow: c => navigate('/characters/' + c.id) });
 }
 
 async function accountPage() {
@@ -502,7 +519,9 @@ async function accountPage() {
   });
   return [pageHead({ crumbs: [{ href: '/', label: 'Home' }, { label: 'Account' }], title: account.name,
     after: account.admin ? chip('admin', 'Admin') : null,
-    actions: [densityToggle(), account.admin && link('/admin', { class: 'btn secondary sm' }, icon('shield'), 'Admin area')] }),
+    actions: [densityToggle(), link('/account/security', { class: 'btn secondary sm' }, icon('key'), 'Security'),
+      account.admin && link('/admin', { class: 'btn secondary sm' }, icon('shield'), 'Admin area')] }),
+  state.session?.twoFactorRequired && twoFactorBanner(),
   h('div', { class: 'grid' },
     h('div', { class: 'span-8' }, card('Characters', null,
       account.characters.length ? characterTable(account.characters) : emptyState('user', 'No characters yet', 'Create one in the game; it shows up here.'))),
@@ -523,11 +542,22 @@ const laterSections = [['items', 'Items & monsters', 'box'], ['mail', 'Mail & re
   ['gm', 'GM console', 'terminal'], ['economy', 'Economy log', 'coins'], ['news', 'News editor', 'pen'], ['broadcasts', 'Broadcasts', 'bell']];
 
 /**
+ * Staff roles, each with everything of the ones before it. A sidebar entry shows only to the roles that may use it
+ * (its registered role, else this table, else GM); the server checks every request anyway.
+ */
+const roleRank = { '': 0, moderator: 1, gm: 2, admin: 3 };
+const sectionRoles = { dashboard: 'moderator', accounts: 'moderator', audit: 'moderator' };
+const mayUse = role => (roleRank[state.session?.role || ''] ?? 0) >= roleRank[role || 'gm'];
+/** Cards a page file adds to an account's admin page: functions of the account returning a node (or null). */
+const adminAccountCards = [];
+
+/**
  * An admin page from its own file (www/pages/*.js, loaded after this one): a sidebar entry, which replaces the
  * "Coming later" entry of the same id, and its route. Call it while the scripts load, before the first route.
  */
-function registerAdminPage({ id, label, icon: iconName, path, pattern, page }) {
-  adminSections.push([id, path, label, iconName]);
+function registerAdminPage({ id, label, icon: iconName, path, pattern, page, role }) {
+  if (role) sectionRoles[id] = role;
+  if (path) adminSections.push([id, path, label, iconName]);
   const later = laterSections.findIndex(([laterId]) => laterId === id);
   if (later >= 0) laterSections.splice(later, 1);
   routes.push([pattern, page, 'admin']);
@@ -536,17 +566,30 @@ function registerAdminPage({ id, label, icon: iconName, path, pattern, page }) {
 function adminLayout(current, ...content) {
   const side = h('nav', { class: 'card side', 'aria-label': 'Admin' },
     h('span', { class: 'label' }, 'Admin'),
-    adminSections.map(([id, href, label, name]) => link(href, { 'aria-current': id === current ? 'page' : null }, icon(name), label)),
+    // The roles' own pages first: moderation, then the GM tools, then the Admin's (a stable sort keeps each group's order).
+    adminSections.filter(([id]) => mayUse(sectionRoles[id]))
+      .sort((a, b) => roleRank[sectionRoles[a[0]] || 'gm'] - roleRank[sectionRoles[b[0]] || 'gm']).map(([id, href, label, name]) =>
+      link(href, { 'aria-current': id === current ? 'page' : null }, icon(name), label)),
     laterSections.length > 0 && [h('hr'), h('span', { class: 'label' }, 'Coming later')],
     laterSections.map(([, label, name]) => h('span', { class: 'later', 'aria-disabled': 'true' }, icon(name), label)));
   return h('div', { class: 'admin' }, side, h('div', { class: 'admin-main' }, content));
 }
 
+const roleName = role => ({ moderator: 'Moderator', gm: 'GM', admin: 'Admin' })[role] || 'Player';
+/** A staff role's chip (its own class: "admin" alone is the admin layout's). */
+const roleChip = role => chip('role-' + role, roleName(role));
+
 const adminCrumbs = (...rest) => [{ href: '/', label: 'Home' }, { href: '/admin', label: 'Admin' }, ...rest];
 
 function requireAdmin() {
   if (!state.session?.account) throw new ApiError('Please log in.', 401);
-  if (!state.session.admin) throw new ApiError('Only an admin can open this page.', 403);
+  if (!state.session.admin) throw new ApiError('Only staff can open this page.', 403);
+}
+
+/** A page of the given staff role or above (moderator, gm, admin). */
+function requireRole(role) {
+  requireAdmin();
+  if (!mayUse(role)) throw new ApiError(role === 'admin' ? 'Only an Admin can open this page.' : 'Only a GM or an Admin can open this page.', 403);
 }
 
 async function adminDashboard() {
@@ -609,18 +652,19 @@ async function adminAccounts() {
 
 async function adminAccount(name) {
   requireAdmin();
-  const { account, admin } = await api('GET', '/api/admin/accounts/' + encodeURIComponent(name));
+  const { account, admin, role } = await api('GET', '/api/admin/accounts/' + encodeURIComponent(name));
   const self = account.name === state.session.account;
   const status = account.ban ? chip('banned', 'Banned') : chip('active', 'Active');
   return adminLayout('accounts',
     pageHead({ crumbs: adminCrumbs({ href: '/admin/accounts', label: 'Accounts' }, { label: account.name }), title: account.name,
-      after: [status, admin && chip('admin', 'Admin')], actions: densityToggle() }),
+      after: [status, admin && roleChip(role)], actions: densityToggle() }),
     h('div', { class: 'grid' },
-      h('div', { class: 'span-8' }, card('Characters', null,
-        account.characters.length ? characterTable(account.characters, true) : emptyState('user', 'No characters', null))),
+      h('div', { class: 'span-8 stack' }, card('Characters', null,
+        account.characters.length ? characterTable(account.characters, true) : emptyState('user', 'No characters', null)),
+        adminAccountCards.map(f => f(account, self))),
       h('div', { class: 'span-4 stack' },
         card('Account', null, body(facts([['Name', mono(account.name)], ['Created', stamp(account.created)], ['Last played', stamp(account.lastLogin)],
-          ['Role', admin ? 'Admin (GM list)' : 'Player']]))),
+          ['Role', roleName(role)]]))),
         card(account.ban ? 'Ban' : 'Ban this account', null,
           body(self ? h('p', { class: 'hint' }, 'This is your own account.') : account.ban ? unbanForm(account) : banForm(account))))));
 }

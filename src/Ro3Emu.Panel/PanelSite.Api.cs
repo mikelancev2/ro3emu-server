@@ -37,19 +37,23 @@ public sealed partial class PanelSite
         Post("/api/account/password", Access.Player, ChangePasswordAsync),
     ];
 
-    private object SessionBody(string? account, string csrf) => new
+    /// <param name="role">The staff role the routes grant (none while a required second factor is off).</param>
+    private object SessionBody(string? account, PanelRole role, string csrf) => new
     {
         account,
-        admin = account != null && _backend.IsAdmin(account),
+        admin = role != PanelRole.None,
+        role = PanelRoles.Key(role),
+        // A GM or Admin whose required second factor is not on yet: the page asks to turn it on.
+        twoFactorRequired = account != null && role == PanelRole.None && NeedsTwoFactor(_ops.RoleOf(account)),
         csrf,
         registration = _options.Registration,
-        server = new { name = _backend.Info.Name, area = _backend.Info.Area },
+        server = BrandBody(),
     };
 
     /// <summary>Who is signed in, and the CSRF token for the next POST (a visitor cookie is set before a login).</summary>
     private Task<Reply> SessionAsync(Call call)
     {
-        if (call.SessionId != null) return Task.FromResult(Reply.Ok(SessionBody(call.Account, _sessions.Csrf("session", call.SessionId))));
+        if (call.SessionId != null) return Task.FromResult(Reply.Ok(SessionBody(call.Account, call.Role, _sessions.Csrf("session", call.SessionId))));
         string? visitor = call.Context.Request.Cookies[VisitorCookie];
         if (string.IsNullOrEmpty(visitor) || visitor.Length > 64)
         {
@@ -57,17 +61,23 @@ public sealed partial class PanelSite
             SetCookie(call.Context, VisitorCookie, visitor);
         }
         if (call.Context.Request.Cookies.ContainsKey(SessionCookie)) ClearCookie(call.Context, SessionCookie);
-        return Task.FromResult(Reply.Ok(SessionBody(null, _sessions.Csrf("visitor", visitor))));
+        return Task.FromResult(Reply.Ok(SessionBody(null, PanelRole.None, _sessions.Csrf("visitor", visitor))));
     }
 
-    /// <summary>A new session for <paramref name="account"/>: a fresh id (never the one sent before the login).</summary>
-    private Reply SignIn(Call call, string account)
+    /// <summary>
+    /// A new session for <paramref name="account"/>: a fresh id (never the one sent before the login), recorded in the
+    /// account's login history.
+    /// </summary>
+    private async Task<Reply> SignInAsync(Call call, string account)
     {
         _sessions.End(call.SessionId);
-        string sessionId = _sessions.Create(account);
+        string sessionId = _sessions.Create(account, _options.LoginAddresses ? call.Client?.ToString() : null,
+            call.Context.Request.Headers.UserAgent.ToString());
         SetCookie(call.Context, SessionCookie, sessionId);
         ClearCookie(call.Context, VisitorCookie);
-        return Reply.Ok(SessionBody(account, _sessions.Csrf("session", sessionId)));
+        await _ops.RecordLoginAsync(account, "panel", call.Client);
+        LogLogin(_log, account);
+        return Reply.Ok(SessionBody(account, await StaffRoleAsync(account), _sessions.Csrf("session", sessionId)));
     }
 
     private async Task<Reply> LoginAsync(Call call)
@@ -80,8 +90,10 @@ public sealed partial class PanelSite
         // Null for a wrong password, an unknown name and a banned account alike, as the game's login answers.
         if (await _backend.VerifyAsync(name, password) is not { } account)
             return Reply.Error(StatusCodes.Status401Unauthorized, WrongCredentials);
-        LogLogin(_log, account);
-        return SignIn(call, account);
+        // With a second factor the password only opens a challenge; the session comes with the code (LoginCodeAsync).
+        if ((await _ops.TwoFactorAsync(account)).Enabled)
+            return Reply.Ok(new { twoFactor = true, challenge = _sessions.Challenge(account), csrf = ExpectedCsrf(call.Context, null) });
+        return await SignInAsync(call, account);
     }
 
     private Task<Reply> LogoutAsync(Call call)
@@ -103,7 +115,7 @@ public sealed partial class PanelSite
         LogRegistration(_log, name, result);
         return result switch
         {
-            PanelRegistration.Created => SignIn(call, name),
+            PanelRegistration.Created => await SignInAsync(call, name),
             PanelRegistration.Invalid => Reply.Error(StatusCodes.Status400BadRequest, "This account name cannot be used."),
             // A banned name answers like a taken one: the page does not reveal a ban.
             _ => Reply.Error(StatusCodes.Status409Conflict, "This account name is taken."),
@@ -143,7 +155,7 @@ public sealed partial class PanelSite
         var counts = await _backend.CountsAsync();
         return Reply.Ok(new
         {
-            name = info.Name, area = info.Area, version = info.Version, players = _backend.PlayersOnline(),
+            name = ServerName, tagline = Trimmed(Brand.Tagline, 160), area = info.Area, version = info.Version, players = _backend.PlayersOnline(),
             accounts = counts.Accounts, characters = counts.Characters,
             startedUtc = info.StartedUtc, uptimeSeconds = (long)Math.Max(0, (_clock.GetUtcNow() - info.StartedUtc).TotalSeconds),
         });
@@ -162,7 +174,11 @@ public sealed partial class PanelSite
         var roles = await _backend.OnlineAsync();
         return Reply.Ok(new
         {
-            players = roles.Select(r => new { name = r.Name, @class = r.Class, level = r.Level, map = r.Map, account = call.Admin ? r.Account : null }),
+            players = roles.Select(r => new
+            {
+                name = r.Name, @class = r.Class, classIcon = r.ClassIcon, level = r.Level, map = r.Map, mapId = r.MapId,
+                account = call.Admin ? r.Account : null,
+            }),
         });
     }
 

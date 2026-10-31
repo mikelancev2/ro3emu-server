@@ -30,6 +30,8 @@ public readonly partial record struct NPCConfig(JsonElement Row)
     [ConfigField("_iNeedNotifyGlobalData")] public partial long NeedNotifyGlobalData { get; }
     [ConfigField("_iNoSelected")] public partial long NoSelected { get; }
     [ConfigField("_iNormalDrop")] public partial long[] NormalDrop { get; }
+    /// <summary>The model's radius in cm (the City Gate's 1000, the ram's 500).</summary>
+    [ConfigField("_iPrefabRadius")] public partial long PrefabRadius { get; }
     [ConfigField("_iRace")] public partial long Race { get; }
     [ConfigField("_iSize")] public partial long Size { get; }
     [ConfigField("_iSpeed")] public partial long Speed { get; }
@@ -37,10 +39,14 @@ public readonly partial record struct NPCConfig(JsonElement Row)
     [ConfigField("_iWildMonsters")] public partial long WildMonsters { get; }
     [ConfigField("_kAttriScale")] public partial long[][] AttriScale { get; }
     [ConfigField("_kBornEventBuff")] public partial long[][] BornEventBuff { get; }
+    /// <summary>The portrait the client shows for the NPC or monster (a sprite name, "headicon_monster_poring.png").</summary>
+    [ConfigField("_kHeadIcon")] public partial string HeadIcon { get; }
     [ConfigField("_kMultiverseArray")] public partial long[] MultiverseArray { get; }
     [ConfigField("_kName")] public partial long[] Name { get; }
     [ConfigField("_kNpcShowCondition")] public partial long NpcShowCondition { get; }
     [ConfigField("_kNpcTag")] public partial long[] NpcTag { get; }
     [ConfigField("_kRespawnSkill")] public partial long RespawnSkill { get; }
     [ConfigField("_kSkills")] public partial long[] Skills { get; }
+    [ConfigField("_kTitle")] public partial JsonElement? Title { get; }
+    [ConfigField("_kShowIcon")] public partial string ShowIcon { get; }
 }
