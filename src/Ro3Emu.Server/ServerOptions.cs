@@ -550,6 +550,10 @@ public sealed class ShopOptions
 
     /// <summary>Free top-ups of one package a role may take per game day (inferred cap, at least 1).</summary>
     public int FreeTopUpsPerDay { get; set; } = 1;
+
+    /// <summary>The Chronicles website's address; its /api/game-checkout.php starts the Stripe checkout a month card
+    /// purchase opens in the browser (NewActivityService.Purchases). Empty refuses a month card order.</summary>
+    public string WebsiteBaseUrl { get; set; } = "";
 }
 
 /// <summary>Both off by default so the tests keep the original's pass; a realm turns them on (docs/systems/activities-battlepass-monthcard.md).</summary>

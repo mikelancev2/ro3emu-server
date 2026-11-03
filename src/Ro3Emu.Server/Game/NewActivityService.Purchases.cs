@@ -1,5 +1,6 @@
 using System.Globalization;
 using Romsg;
+using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Game.Ownership;
 
@@ -19,6 +20,9 @@ namespace Ro3Emu.Server.Game;
 /// its first-purchase bonus once per role; a gift pack once; a month card only below the card's own day limit
 /// (LC_MonthCardHelper.JustIsUpperLimit); the pass only while the open pass is not premium and its item is not owned;
 /// the pass gift token while none is owned, once per game day.
+/// A month card is real money when Ro3Emu:Shop:WebsiteBaseUrl is set, regardless of FreeProducts: no item is granted
+/// here, the response's transaction_url sends the browser to the website's Stripe checkout for that package, and the
+/// website's own webhook mails the card item once Stripe confirms payment (DonationStore.CompleteAsync).
 /// </summary>
 public sealed partial class NewActivityService
 {
@@ -37,7 +41,9 @@ public sealed partial class NewActivityService
     {
         var response = new CreateOrderResp { ChargeId = req.ChargeId, ChargeType = req.ChargeType };
         long firstCharge = 0;
-        if (!_freeProducts || session.Role == null) response.Result = ErrorCodes.FeatureUnavailable;
+        bool monthCard = req.ChargeType == ChargeProduct && _websiteBaseUrl.Length > 0
+            && ProductConfig.Get(_data, req.ChargeId) is { Type: ProductMonthCard };
+        if (session.Role == null || (!_freeProducts && !monthCard)) response.Result = ErrorCodes.FeatureUnavailable;
         else
         {
             var lease = _deadlines.Capture(session);
@@ -47,8 +53,9 @@ public sealed partial class NewActivityService
             {
                 if (!_deadlines.IsCurrent(session, lease)) return;
                 string order = $"ro3emu-{session.Role.Id.ToString(CultureInfo.InvariantCulture)}-{Guid.NewGuid():N}";
-                (response.Result, firstCharge) = await PurchaseAsync(session, req, order);
-                if (response.Result == 0) { response.OrderId = order; response.OrderData = "{}"; }
+                string? checkoutUrl;
+                (response.Result, firstCharge, checkoutUrl) = await PurchaseAsync(session, req, order);
+                if (response.Result == 0) { response.OrderId = order; response.OrderData = CheckoutOrderData(checkoutUrl); }
                 if (!_deadlines.IsCurrent(session, lease)) return;
             }
             finally { session.ActivityGate.Release(); ownerScope?.Dispose(); }
@@ -57,6 +64,10 @@ public sealed partial class NewActivityService
         await session.SendGameAsync(CreateOrder, response);
         if (firstCharge > 0) await session.SendGameAsync(FirstRechargeUpdate, new UpdateRechargeFirstAwardResp { RechargeId = firstCharge });
     }
+
+    /// <summary>_onCreateOrderResult opens orderData.data.transaction_url when it parses; "{}" opens nothing.</summary>
+    private static string CheckoutOrderData(string? url) => url is null ? "{}"
+        : System.Text.Json.JsonSerializer.Serialize(new { data = new { transaction_url = url } });
 
     /// <summary>2002: an order this server issued to the role is paid already; anything else is "Order does not exist".</summary>
     public Task PayResultAsync(GameSession session, PayResultReq req) => session.SendGameAsync(PayResult, new PayResultResp
@@ -86,10 +97,16 @@ public sealed partial class NewActivityService
 
     private long GameDayNumber => DateOnly.FromDateTime(DailyActivityService.GameDay(_clock.GetLocalNow().DateTime)).DayNumber;
 
-    private async Task<(int Result, long FirstCharge)> PurchaseAsync(GameSession session, CreateOrderReq req, string order)
+    private async Task<(int Result, long FirstCharge, string? CheckoutUrl)> PurchaseAsync(GameSession session, CreateOrderReq req, string order)
     {
         if (!session.ActivitiesReady || session.NewActivities == null || session.ActivityRuntime == null || session.Progress == null)
-            return (ErrorCodes.FeatureUnavailable, 0);
+            return (ErrorCodes.FeatureUnavailable, 0, null);
+        if (req.ChargeType == ChargeProduct && _websiteBaseUrl.Length > 0
+            && ProductConfig.Get(_data, req.ChargeId) is { Type: ProductMonthCard })
+        {
+            var (checkoutResult, url) = MonthCardCheckout(session, req.ChargeId);
+            return (checkoutResult, 0, url);
+        }
         string key = PurchaseKey(req.ChargeType, req.ChargeId);
         var bought = session.ActivityRuntime.Purchases.GetValueOrDefault(key) ?? new PurchaseRecord();
         long day = GameDayNumber;
@@ -100,15 +117,39 @@ public sealed partial class NewActivityService
             ChargeProduct => Product(session, req.ChargeId, bought, today),
             _ => (ErrorCodes.TopUpType, [], 0),
         };
-        if (priced.Result != 0) return (priced.Result, 0);
+        if (priced.Result != 0) return (priced.Result, 0, null);
         var runtime = CloneRuntime(session);
         runtime.Purchases[key] = new PurchaseRecord { Total = bought.Total + 1, Day = day, DayCount = today + 1 };
         int result = await CommitAsync(session, session.NewActivities.Clone(), extra: priced.Grants, runtime: runtime,
             source: "purchase/" + order);
-        if (result != 0) return (result, 0);
+        if (result != 0) return (result, 0, null);
         await ReconcilePassAsync(session);
         await ReconcileMonthCardAsync(session);
-        return (0, priced.FirstCharge);
+        return (0, priced.FirstCharge, null);
+    }
+
+    /// <summary>No item is granted: the card's day-limit is checked so real money is never wasted on an order that
+    /// CreateOrder would refuse, then the browser is sent to the website's checkout for the matching package.</summary>
+    private (int Result, string? Url) MonthCardCheckout(GameSession session, long chargeId)
+    {
+        var cards = MonthCardConfig.All(_data).Where(c => c.Product == chargeId).ToList();
+        if (cards.Count == 0) return (ErrorCodes.TopUpOption, null);
+        var card = cards[0];
+        string? packageId = card.Item switch
+        {
+            DonationStore.StandardMonthCard => "monthcard-standard",
+            DonationStore.PremiumMonthCard => "monthcard-premium",
+            _ => null,
+        };
+        if (packageId == null) return (ErrorCodes.TopUpOption, null);
+        if (ActivityError(session, MonthCardActivity, MonthCardType) is var error and not 0) return (error, null);
+        var owned = session.NewActivities!.ActivityInfo[MonthCardActivity].ActivityParam.MonthCard.Infos;
+        long lastDays = owned.GetValueOrDefault(card.Id) is { } info && info.ExpireTs > Now ? info.LastDays : 0;
+        lastDays += Owned(session, (int)card.Item) * card.Day;
+        if (lastDays + card.Day >= card.DayLimit) return (ErrorCodes.TopUpLimit, null);
+        string role = session.Role!.Id.ToString(CultureInfo.InvariantCulture);
+        string url = $"{_websiteBaseUrl.TrimEnd('/')}/api/game-checkout.php?package={packageId}&role={role}";
+        return (0, url);
     }
 
     /// <summary>A top-up: _kAward, plus _kFirstChargeAward the first time or _kAwardBonus after (UI_Sys_TopUpListWidgetCtrl

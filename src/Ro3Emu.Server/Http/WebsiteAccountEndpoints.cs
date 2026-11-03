@@ -24,9 +24,8 @@ public static class WebsiteAccountEndpoints
         app.MapPost("/ro3emu/accounts/register", async (HttpRequest request, CredentialLimiter limiter, AccountStore accounts,
             RoleStore roles, GameData data, SessionRegistry sessions, GameLoop loop) =>
         {
-            if (request.HttpContext.Connection.RemoteIpAddress is not { } ip || !System.Net.IPAddress.IsLoopback(ip))
-                return Results.NotFound();
-            if (!limiter.TryAcquire(ip)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+            if (!Loopback(request.HttpContext)) return Results.NotFound();
+            if (!limiter.TryAcquire(request.HttpContext)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
             var form = await request.ReadFormAsync();
             string name = form["name"].ToString().Trim();
             string password = form["password"].ToString();
@@ -55,9 +54,8 @@ public static class WebsiteAccountEndpoints
 
         app.MapGet("/ro3emu/accounts/available", async (HttpRequest request, CredentialLimiter limiter, AccountStore accounts) =>
         {
-            if (request.HttpContext.Connection.RemoteIpAddress is not { } ip || !System.Net.IPAddress.IsLoopback(ip))
-                return Results.NotFound();
-            if (!limiter.TryAcquire(ip)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+            if (!Loopback(request.HttpContext)) return Results.NotFound();
+            if (!limiter.TryAcquire(request.HttpContext)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
             string name = request.Query["name"].ToString().Trim();
             if (!NamePattern.IsMatch(name)) return Results.Json(new { available = false, error = "bad_name" }, statusCode: 400);
             bool exists = await accounts.NameExistsAsync(name);
@@ -68,8 +66,7 @@ public static class WebsiteAccountEndpoints
             AccountStore accounts, RoleStore roles, GameData data, SessionRegistry sessions, GameLoop loop) =>
         {
             if (!Loopback(request.HttpContext)) return Results.NotFound();
-            var ip = ClientAddress(request);
-            if (!limiter.TryAcquire(ip)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+            if (!limiter.TryAcquire(request.HttpContext)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
             var form = await request.ReadFormAsync();
             string name = form["name"].ToString().Trim();
             string password = form["password"].ToString();
@@ -108,7 +105,7 @@ public static class WebsiteAccountEndpoints
                 : Results.Json(new
                 {
                     ok = true, orderId = order.OrderId, order.PackageId,
-                    order.Crystals, order.AmountCents, order.Currency
+                    order.ItemEntry, order.ItemCount, order.AmountCents, order.Currency
                 });
         });
 
@@ -146,7 +143,7 @@ public static class WebsiteAccountEndpoints
             return Results.Json(new
             {
                 ok = true, order.OrderId, order.Account, order.RoleId, order.PackageId,
-                order.Crystals, order.AmountCents, order.Currency, order.Status
+                order.ItemEntry, order.ItemCount, order.AmountCents, order.Currency, order.Status
             });
         });
     }
@@ -157,10 +154,6 @@ public static class WebsiteAccountEndpoints
 
     private static bool Loopback(HttpContext context) =>
         context.Connection.RemoteIpAddress is { } ip && System.Net.IPAddress.IsLoopback(ip);
-
-    private static System.Net.IPAddress ClientAddress(HttpRequest request) =>
-        System.Net.IPAddress.TryParse(request.Headers["X-Chronicles-Client-IP"].ToString(), out var forwarded)
-            ? forwarded : request.HttpContext.Connection.RemoteIpAddress!;
 
     private static async Task<object> ProfileAsync(string account, RoleStore roles, GameData data,
         SessionRegistry sessions, GameLoop loop)

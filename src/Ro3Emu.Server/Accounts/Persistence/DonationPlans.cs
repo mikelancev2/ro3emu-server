@@ -26,6 +26,8 @@ internal sealed class DonationSchemaPlan : DbPlan
             );
             CREATE INDEX IF NOT EXISTS website_donation_account ON website_donation(account,created_utc DESC);
             """);
+        // Existing rows predate item-based packages; they were all Sacred Relic Crystal deliveries.
+        SchemaSql.AddColumn(db, tx, "website_donation", "item_entry", "INTEGER NOT NULL DEFAULT 3");
         return 1;
     }
 }
@@ -43,14 +45,15 @@ internal sealed class DonationPreparePlan(DonationOrder order) : DbPlan
         if (owner.ExecuteScalar() is null) return false;
         using var insert = DbSql.Command(db, tx, """
             INSERT INTO website_donation
-                (order_id,account,role_id,package_id,crystals,amount_cents,currency,status,created_utc)
-            VALUES ($order,$account,$role,$package,$crystals,$amount,$currency,'pending',$created)
+                (order_id,account,role_id,package_id,crystals,item_entry,amount_cents,currency,status,created_utc)
+            VALUES ($order,$account,$role,$package,$crystals,$item,$amount,$currency,'pending',$created)
             """);
         insert.Parameters.AddWithValue("$order", order.OrderId);
         insert.Parameters.AddWithValue("$account", order.Account);
         insert.Parameters.AddWithValue("$role", order.RoleId);
         insert.Parameters.AddWithValue("$package", order.PackageId);
-        insert.Parameters.AddWithValue("$crystals", order.Crystals);
+        insert.Parameters.AddWithValue("$crystals", order.ItemCount);
+        insert.Parameters.AddWithValue("$item", order.ItemEntry);
         insert.Parameters.AddWithValue("$amount", order.AmountCents);
         insert.Parameters.AddWithValue("$currency", order.Currency);
         insert.Parameters.AddWithValue("$created", order.CreatedUtc);
@@ -82,8 +85,8 @@ internal sealed class DonationReadPlan(string? orderId = null, string? sessionId
     internal override object? Execute(SqliteConnection db, SqliteTransaction tx)
     {
         using var cmd = DbSql.Command(db, tx, orderId is not null
-            ? "SELECT order_id,stripe_session_id,stripe_payment_intent,stripe_event_id,account,role_id,package_id,crystals,amount_cents,currency,status,created_utc,paid_utc FROM website_donation WHERE order_id=$value"
-            : "SELECT order_id,stripe_session_id,stripe_payment_intent,stripe_event_id,account,role_id,package_id,crystals,amount_cents,currency,status,created_utc,paid_utc FROM website_donation WHERE stripe_session_id=$value");
+            ? "SELECT order_id,stripe_session_id,stripe_payment_intent,stripe_event_id,account,role_id,package_id,item_entry,crystals,amount_cents,currency,status,created_utc,paid_utc FROM website_donation WHERE order_id=$value"
+            : "SELECT order_id,stripe_session_id,stripe_payment_intent,stripe_event_id,account,role_id,package_id,item_entry,crystals,amount_cents,currency,status,created_utc,paid_utc FROM website_donation WHERE stripe_session_id=$value");
         cmd.Parameters.AddWithValue("$value", orderId ?? sessionId ?? "");
         using var row = cmd.ExecuteReader();
         return row.Read() ? DonationOrder.Read(row) : null;

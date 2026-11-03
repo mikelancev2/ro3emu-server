@@ -29,7 +29,7 @@ public sealed class PaidProductsTests : IAsyncLifetime
 
     public Task InitializeAsync() => Task.CompletedTask;
 
-    private async Task StartAsync(bool free = true)
+    private async Task StartAsync(bool free = true, string websiteBaseUrl = "")
     {
         var (httpPort, microPort, gamePort) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
@@ -38,6 +38,7 @@ public sealed class PaidProductsTests : IAsyncLifetime
             o.HttpPort = httpPort; o.MicroGatePort = microPort; o.GameGatePort = gamePort;
             o.PlayBook = 101; o.SeasonStart = "2026-10-05";
             o.Shop.FreeProducts = free;
+            o.Shop.WebsiteBaseUrl = websiteBaseUrl;
         }, _clock);
         await _app.StartAsync();
         _http = $"http://127.0.0.1:{httpPort}";
@@ -137,6 +138,28 @@ public sealed class PaidProductsTests : IAsyncLifetime
         while ((await Buy(bot, 2, card.Product)).Result == 0) bought++;
         Assert.Equal((int)((card.DayLimit - 1) / card.Day), bought);
         Assert.Equal(ErrorCodes.TopUpLimit, (await Buy(bot, 2, card.Product)).Result);
+    }
+
+    [ClientDataFact]
+    public async Task MonthCardProductsOpenTheWebsiteCheckoutInsteadOfGrantingWhenRealMoneyIsConfigured()
+    {
+        await StartAsync(free: true, websiteBaseUrl: "https://chronicles.test");
+        await using var bot = await InWorld("Payer");
+        await Gm(bot, "!lvl 20");
+        await Reconcile(bot);
+        var card = MonthCardConfig.All(Service<GameData>()).First();
+        long crystal = Count(bot, 3);
+        string role = Session(bot).Role!.Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string package = card.Item == Ro3Emu.Server.Accounts.DonationStore.StandardMonthCard ? "monthcard-standard" : "monthcard-premium";
+
+        var order = await Buy(bot, 2, card.Product);
+        Assert.Equal(0, order.Result);
+        string url = System.Text.Json.JsonDocument.Parse(order.OrderData).RootElement
+            .GetProperty("data").GetProperty("transaction_url").GetString()!;
+        Assert.Equal($"https://chronicles.test/api/game-checkout.php?package={package}&role={role}", url);
+        Assert.Equal(0, Count(bot, (int)card.Item));
+        Assert.Equal(crystal, Count(bot, 3)); // no _iBuyAward: nothing is granted before Stripe confirms payment
+        Assert.False(Session(bot).NewActivities!.ActivityInfo[199].ActivityParam.MonthCard.Infos.ContainsKey(card.Id));
     }
 
     [ClientDataFact]
