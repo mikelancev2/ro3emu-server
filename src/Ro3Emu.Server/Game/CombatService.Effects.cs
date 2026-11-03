@@ -504,7 +504,6 @@ public sealed partial class CombatService
         new Dictionary<string, (DisplaceKind, int, float)>
         {
             ["BackSlide"] = (DisplaceKind.CasterBack, 0, 0),
-            ["yingliu"] = (DisplaceKind.CasterForward, 0, 0),             // Flowing Shadow: "dash ${1} meters as a phantom"
             ["yingliuS1"] = (DisplaceKind.CasterForward, 0, 0),
             ["hesehuanying"] = (DisplaceKind.CasterToTarget, 4, 0),       // Shadow Step: "a point ${5} meters in front of the target"
             ["hesehuanyingS1"] = (DisplaceKind.CasterToTarget, 4, 0),
