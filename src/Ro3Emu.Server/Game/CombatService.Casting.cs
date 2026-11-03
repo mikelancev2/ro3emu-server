@@ -93,6 +93,7 @@ public sealed partial class CombatService
                 : !Learned(s, row!.Value) && s.GmCastSkill != request.SkillId && !GrantedSkill.Exists(granted => granted(s, req.SkillId))))
                 error = ErrorCodes.SkillNotLearned;
             else if (!SkillModeAllowed(s, row!.Value)) error = ErrorCodes.SkillRequirements;
+            else if (own == null && owned == null && s.GmCastSkill != request.SkillId && !SkillConditionMet(s, row.Value)) error = ErrorCodes.SkillRequirements;
             else if (GameData.Int(row!.Value, "_iBasicType") != 1) error = ErrorCodes.SkillPassive;
             else if (_buffs.HasForbidden(s, new SkillConfig(row.Value).IsNormalAttack(_data)
                 ? ForbiddenState.NormalAttack : ForbiddenState.CastSkill)) error = ErrorCodes.SkillBadState;
@@ -105,6 +106,7 @@ public sealed partial class CombatService
         {
             int group = (int)GameData.Int(row!.Value, "_iSkillID"), mode = (int)GameData.Int(row.Value, "_iMode");
             if (own == null && Math.Max(s.SkillCds.GetValueOrDefault(group), s.SkillModeCds.GetValueOrDefault((group, mode))) > Now) error = ErrorCodes.SkillCooldown;
+            else if (own == null && Now < s.SwingLockUntilMs - SwingJitterMs && new SkillConfig(row.Value).IsNormalAttack(_data)) error = ErrorCodes.SkillBusy;
             else if (s.SkillCast is { Cancelled: false } active && Now < active.StartMs + active.ChantMs + active.ActionMs
                 && !CastYields(active, row.Value, req)) error = ErrorCodes.SkillBusy;
             else error = ValidateTarget(s, row.Value, req, origin, owned == null ? WalkSlack(s) : 0,
@@ -452,6 +454,11 @@ public sealed partial class CombatService
             // beyond the skill's reach and area is not a point it could aim at (inferred), so the caster's is used.
             float aim = Math.Max(Math.Max(Range(row), askedRange), new SkillConfig(row).Range.FirstOrDefault(0) / 100f) + 1 + slack;
             if (req.TargetPos == null || Distance(origin, req.TargetPos) > aim) req.TargetPos = origin.Clone();
+            // A single-target row released this way hits the id the client names (SelectEnemies), and only a lock checks
+            // that id's distance. (inferred) One out of reach is not hit, and the cast stands: such a row can be pressed
+            // with a far target still selected. A row without a reach in its data says nothing to compare.
+            if (new SkillConfig(row).RangeType == SkillRelease.SingleTarget && aim > 1 + slack
+                && (monster?.Pos ?? enemyPlayer?.Position) is { } named && Distance(origin, named) > aim) req.TargetId = 0;
             return 0;
         }
         if (!_buffs.CanSeePosition(s, targetPosition)) return ErrorCodes.SkillTargetInvalid;
@@ -638,7 +645,8 @@ public sealed partial class CombatService
         s.SkillCast = action;
         // A caster that may not walk while casting (_bMovement 0) saves up no walking distance until the cast ends: a client
         // that walks on without reporting it cannot claim the distance afterwards (SceneService.AcceptWalkAsync).
-        if (actor == null && new SkillConfig(row).Movement == 0)
+        // One pressed in mid-walk is the exception: the client walks on (PlayerMoved).
+        if (actor == null && !s.Walking && new SkillConfig(row).Movement == 0)
             SceneService.HoldWalk(s, DateTime.UtcNow.AddMilliseconds(leadMs + action.ChantMs + action.ActionMs), s.Walking);
         s.WorldState.ResurrectionCastId = Script(row) == "Resurrection" ? id : 0;
         s.Face = face;
@@ -717,12 +725,29 @@ public sealed partial class CombatService
         if (interrupted && req?.NxtSkill is { } next) await CastAsync(s, next);
     }
 
+    /// <summary>
+    /// LC_State_Unit_Skill ends a skill in its action phase when StatusForbidden holds SkillCast. (inferred) SkillChant does the
+    /// same for the chant, which is what the name says, though the client's own use of it was not found. So Sleep and Silence
+    /// break a cast, and Stun or Freeze, whose _kForbidden has neither, do not.
+    /// </summary>
+    private Task BreakForbiddenCastAsync(GameSession s) =>
+        s.SkillCast is { Cancelled: false } cast
+        && _buffs.HasForbidden(s, Now - cast.StartMs < cast.ChantMs ? ForbiddenState.SkillChant : ForbiddenState.SkillCast)
+            ? CancelCastAsync(s, SkillInterruptedInfo.Types.SkillInterruptType.State) : Task.CompletedTask;
+
     private async Task CancelCastAsync(GameSession s, SkillInterruptedInfo.Types.SkillInterruptType cause)
     {
         s.WorldState.ResurrectionCastId = 0;
         if (s.SkillCast is not { } action) return;
         action.Cancelled = true;
         s.SkillCast = null;
+        // The client lets a move end a swing only from the show's m_fInterruptTime_move, well after its hit. Without this a
+        // step or a 31124 right after the hit, and a new swing, hits faster than the attack speed allows. A swing that killed
+        // its target gains nothing from this, and walking on to the next monster must not be refused.
+        if (cause == SkillInterruptedInfo.Types.SkillInterruptType.Move && new SkillConfig(action.Row).IsNormalAttack(_data)
+            && (FindMonster(s.WorldScene, action.Request.TargetId) is { Hp: > 0 } || EventTarget(s, action.Request.TargetId) is { Dead: false })
+            && SkillShow.MoveInterruptOffset(_data.SkillTemplate(new SkillConfig(action.Row).ScriptShow), action.ChantMs, action.ActionMs) is { } moveMs)
+            s.SwingLockUntilMs = action.StartMs + moveMs;
         s.WalkAllowance.Release(DateTime.UtcNow);
         await ToPlayerAndViewersAsync(s, SkillEnd, new SkillEndNotify
         {
@@ -751,13 +776,13 @@ public sealed partial class CombatService
         // A walk that sets off (not a stop) after the arrival grace ends a cast that holds the caster in place, even before it
         // has moved: the client interrupts such a cast to walk, and the walk budget is held until the cast ends.
         if (Distance(cast.Origin, s.Position) <= 0.1f && !(s.Walking && Now - cast.StartMs > 300)) return;
-        // The client casts on reaching range and stops 1 ms later (in-game 11.10): that first stop is the cast's real
-        // origin, within the distance the walk can have covered, not a move that interrupts it.
-        if (cast.StartedWalking && !s.Walking && Now - cast.StartMs <= 300
-            && Distance(cast.Origin, s.Position) <= s.Speed / 100.0 * WalkedSeconds(cast.WalkFromUtc) + 0.5)
+        // A cast that began in mid-walk: the client plays it and walks on with the key held, reporting steps and sending no
+        // 31124 (in-game 3.11), and it casts on reaching range and stops 1 ms later (in-game 11.10). Neither ends the cast;
+        // the walk budget stays open for it, so the steps are still paced (inferred). A walk begun after a stop does end it.
+        if (cast.StartedWalking)
         {
             cast.Origin = s.Position.Clone();
-            cast.StartedWalking = false;
+            if (!s.Walking) cast.StartedWalking = false;
             return;
         }
         _loop.TrackRuntimeDetached("cast movement cancellation", () => CancelCastAsync(s, SkillInterruptedInfo.Types.SkillInterruptType.Move));
