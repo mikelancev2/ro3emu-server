@@ -92,6 +92,7 @@ public sealed partial class DungeonService
         this._scenes = scene;
         this._world = world;
         this._vehicles = vehicles;
+        scene.WalkOnRide = vehicles.IsSeatedOnSceneActor;
         gm.Register("actors", "[npcId | walk <x> <z> | use] (scripted scene test aid: the step's scene actors, jump beside one, arrive at x z as a walk would, or complete the step server-side)", ActorsGmAsync);
         WireRaidTrials(combat, gm);
         teams.MultiDungeonInfo = TeamDungeonInfo;
@@ -111,6 +112,9 @@ public sealed partial class DungeonService
 
     public sealed class Attempt
     {
+        /// <summary>Who sits on a scene actor now (a ride, DungeonService.Ride), with the seat's token.</summary>
+        internal Dictionary<GameSession, long> Riders { get; } = [];
+
         public required InstanceService.Room Room { get; init; }
         public required DungeonCatalog.Plan Plan { get; init; }
         public required long Leader { get; init; }
@@ -165,6 +169,8 @@ public sealed partial class DungeonService
         public bool Spawning { get; set; }
         /// <summary>The current scripted step got one of its completing client events (DungeonService.Scripted).</summary>
         public bool StepDone { get; set; }
+        /// <summary>The wave whose scripted step was completed, so its counter reads full and the next one's does not.</summary>
+        public int GoalFullWave { get; set; } = -1;
         /// <summary>A Realm of the Gods raid waits in its preparation phase (DungeonService.RealmOfGods).</summary>
         public bool Preparing { get; set; }
         /// <summary>The boss's Sacred Blessing level (TenGameplayBuffConfig row) active for this run, fixed at its start.</summary>
@@ -511,8 +517,10 @@ public sealed partial class DungeonService
         var v = new DungeonVar { VarId = 10003 };
         if (Step(a) is { } step && size == 0)
         {
-            // A scripted step: its configured counter, or the events an "all" step has seen (inferred).
-            v.Vi64.Add(step.All ? [a.StepSeen.Count, step.Complete.Count] : [step.Goal.Done, step.Goal.Total]);
+            // A scripted step: its configured counter, or the events an "all" step has seen (inferred). A step that was
+            // completed reads full, or the tracker keeps "Open the treasured chest (0/1)" until the scene ends.
+            bool completed = a.GoalFullWave == a.Wave;
+            v.Vi64.Add(step.All ? [a.StepSeen.Count, step.Complete.Count] : [completed ? step.Goal.Total : step.Goal.Done, step.Goal.Total]);
             return v;
         }
         v.Vi64.Add([Math.Clamp(a.Killed.Count - a.WaveBase, 0, size), size]);

@@ -60,6 +60,8 @@ public readonly partial record struct SkillConfig(JsonElement Row)
     [ConfigField("_iScriptShow")] public partial long ScriptShow { get; }
     [ConfigField("_iSkillAdvanced")] public partial long SkillAdvanced { get; }
     [ConfigField("_iSkillCri")] public partial long SkillCri { get; }
+    [ConfigField("_kDamageFormulaExtra")] public partial string[] DamageFormulaExtra { get; }
+    [ConfigField("_kDamageParamExtra")] public partial long[][] DamageParamExtra { get; }
     [ConfigField("_iSkillEffectLevel")] public partial long SkillEffectLevel { get; }
     [ConfigField("_iSkillHit")] public partial long SkillHit { get; }
     [ConfigField("_iSkillID")] public partial long SkillId { get; }
@@ -102,6 +104,17 @@ public readonly partial record struct SkillConfig(JsonElement Row)
         node["_kBuff1"] = new System.Text.Json.Nodes.JsonArray();
         node["_kBuff2"] = new System.Text.Json.Nodes.JsonArray();
         node["_kShowDmg"] = new System.Text.Json.Nodes.JsonArray();
+        return JsonSerializer.SerializeToElement(node);
+    }
+
+    /// <summary>This row dealing exactly this damage to each target (CombatService.MonsterHitDamage's fixed hit: no ratio,
+    /// defense, element, crit or damage attribute), everything else kept.</summary>
+    public JsonElement AsFixedHit(long damage)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(Row.GetRawText())!.AsObject();
+        node["_kDamageParam1"] = new System.Text.Json.Nodes.JsonArray(0);
+        node["_kDamageParam2"] = new System.Text.Json.Nodes.JsonArray(1); // makes the row a damaging one
+        node["_ro3GuardianFixedHit"] = damage;
         return JsonSerializer.SerializeToElement(node);
     }
 

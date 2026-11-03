@@ -159,12 +159,13 @@ public sealed partial class CombatService
             s.Attack = new AttackLoop
             {
                 Target = target, SkillId = loopSkill,
-                NextSwingMs = Now + lead + SkillMs(s, row.Value) + ChantMs(s, row.Value) + 1,
+                NextSwingMs = Now + lead + SkillMs(s, row.Value) + ChantMs(s, row.Value),
                 StartX = s.Position.X, StartZ = s.Position.Z, StartedWalking = s.Walking, StartMs = Now,
                 ArrivalSpeed = s.Speed / 100f, WalkFromUtc = s.LastWalkUtc
             };
         }
-        else s.Attack = null;
+        // _iIfAutoAtk 1 (NotInterrupt, LC_Skill_RunTimeContext): the running attack goes on after this cast.
+        else if (new SkillConfig(row.Value).IfAutoAtk != 1) s.Attack = null;
         if (GameData.Int(row.Value, "_iIfAutoAtk") == 2 && owned == null && playerTarget != null)
             _eventAttacks[s] = new EventAttack(playerTarget, loopSkill,
                 Now + lead + SkillMs(s, row.Value) + ChantMs(s, row.Value) + 1,
@@ -458,13 +459,15 @@ public sealed partial class CombatService
             // that id's distance. (inferred) One out of reach is not hit, and the cast stands: such a row can be pressed
             // with a far target still selected. A row without a reach in its data says nothing to compare.
             if (new SkillConfig(row).RangeType == SkillRelease.SingleTarget && aim > 1 + slack
-                && (monster?.Pos ?? enemyPlayer?.Position) is { } named && Distance(origin, named) > aim) req.TargetId = 0;
+                && (monster?.Pos ?? enemyPlayer?.Position) is { } named && Distance(origin, named) > aim + (monster?.Template.DamageRadius ?? 0)) req.TargetId = 0;
             return 0;
         }
         if (!_buffs.CanSeePosition(s, targetPosition)) return ErrorCodes.SkillTargetInvalid;
         float d = Distance(origin, targetPosition);
         float reach = slack > 0 ? Distance(WalkPoint(s, origin, targetPosition, slack), targetPosition) - LegJitter : d;
-        if (d < new SkillConfig(row).DistanceMin / 100f - slack || reach > Math.Max(Range(row), askedRange) + 0.5f)
+        // The client adds the target's m_fModelDamageRadius to the casting range: a melee hit on Eddga reaches 5.4 m from its centre, not 3.
+        float body = monster?.Template.DamageRadius ?? 0;
+        if (d < new SkillConfig(row).DistanceMin / 100f - slack || reach > Math.Max(Range(row), askedRange) + body + 0.5f)
             return ErrorCodes.SkillDistance;
         float height = GameData.Int(row, "_iHeightRange") / 100f;
         if (height > 0 && MathF.Abs(origin.Y - targetPosition.Y) > height) return ErrorCodes.SkillHeight;
@@ -523,7 +526,7 @@ public sealed partial class CombatService
                 default: result.Invalid = true; break; // reject an unsupported cost rather than grant a free cast.
             }
         }
-        if (result.Attrs.TryGetValue(AttributeId.Sp, out long sp)) result.Attrs[AttributeId.Sp] = ModifiedSpCost(_buffs.GuardianAttributes(s), sp);
+        if (result.Attrs.TryGetValue(AttributeId.Sp, out long sp)) result.Attrs[AttributeId.Sp] = ModifiedSpCost(_character.Stats(s), sp);
         return result;
     }
 
@@ -569,15 +572,18 @@ public sealed partial class CombatService
     {
         if ((s.GmCombat & GmCombatSwitches.NoCooldown) != 0) return; // GmNoCD / GmUnlimit 1: no skill cooldown starts
         int group = (int)GameData.Int(row, "_iSkillID"), mode = (int)GameData.Int(row, "_iMode");
-        long now = Now, cd = GameData.Int(row, "_iCD");
+        var stats = _character.Stats(s);
+        long now = Now, cd = ReducedCooldown(GameData.Int(row, "_iCD"), stats[AttributeId.PerCd]);
         var notice = new SkillCdNotify { Uuid = s.Role!.Id };
         void Set(int g, int m, long duration, bool shared, int shownMode)
         {
             if (duration <= 0) return;
-            long end = now + duration;
-            s.SkillModeCds[(g, m)] = Math.Max(end, s.SkillModeCds.GetValueOrDefault((g, m)));
+            // The client overwrites by key (LC_Scene_Sync): a shorter public cooldown must not replace the skill's own, so the longest is told.
+            long end = Math.Max(now + duration, s.SkillModeCds.GetValueOrDefault((g, m)));
+            s.SkillModeCds[(g, m)] = end;
             if (shared) s.SkillCds[g] = Math.Max(end, s.SkillCds.GetValueOrDefault(g));
-            notice.Infos.Add(new SkillCdInfo { SkillId = g, SkillMode = shownMode, CdStartTimestampMs = now, CdEndTimestampMs = end });
+            if (notice.Infos.FirstOrDefault(i => i.SkillId == g && i.SkillMode == shownMode) is { } told) told.CdEndTimestampMs = Math.Max(told.CdEndTimestampMs, end);
+            else notice.Infos.Add(new SkillCdInfo { SkillId = g, SkillMode = shownMode, CdStartTimestampMs = now, CdEndTimestampMs = end });
         }
         // The client files a 31113 under group * 10000 + its mode (LC_Skill_Function.GetSkillCDInfoKey) and its bar reads
         // the key of the row it keeps, the row it asks to cast. A mode a talent or a mount selects (type 15: Joint Beat,
@@ -592,19 +598,37 @@ public sealed partial class CombatService
         {
             int sibling = (int)groups[i];
             if (_data.Row("SkillConfig", sibling) is { } siblingRow) sibling = (int)GameData.Int(siblingRow, "_iSkillID");
-            if (sibling > 0) Set(sibling, 0, (long)shared[i], true, 0);
+            if (sibling > 0) Set(sibling, 0, ReducedCooldown((long)shared[i], stats[AttributeId.PerPubCd]), true, 0);
         }
         if (notice.Infos.Count > 0) await s.SendGameAsync(SkillCdUpdate, notice);
     }
 
+    /// <summary>AttributeConfig 205 "Skill Cooldown" and 206 "Global CD": the text says they reduce it, and 15998100 is a blessing with 205 +3000.
+    /// The client takes the times from 31113. (inferred) A plain share; their _kRange lets a debuff lengthen it by up to 99%.</summary>
+    internal static long ReducedCooldown(long ms, long percent) => (long)Math.Round(ms * Math.Max(0, 1 - percent / 10000.0));
+
     /// <summary>Legacy auto-attack entry point, using the same cancellation-safe cast owner as manual skills.</summary>
+    /// <summary>
+    /// May the automatic attack start its next swing? The client plays a swing for the skillMs it is told, and a cast ends just
+    /// after its time, so waiting for that added a whole tick to every swing (500 ms became 550). A normal attack within a tick
+    /// of its end has played out; anything else holds to its end.
+    /// </summary>
+    private bool SwingPlayedOut(ActiveSkillCast? cast, long now) => cast is not { Cancelled: false }
+        || new SkillConfig(cast.Row).IsNormalAttack(_data)
+            && now + GameLoop.TickInterval.Milliseconds > cast.StartMs + cast.ChantMs + cast.ActionMs;
+
+    /// <summary>From the planned time, not the tick that served it, so ticks do not add up: 333 ms swings land 350, 300 and 350
+    /// apart and average 333. A swing held up for longer (a skill in between) does not catch up afterwards.</summary>
+    internal static long NextSwing(long planned, long now, int skillMs) =>
+        Math.Max(planned + skillMs, now + skillMs - GameLoop.TickInterval.Milliseconds);
+
     private async Task SwingAsync(GameSession s, MonsterUnit? target, int skillId, long id)
     {
         if (s.Role == null || s.Progress == null) return;
         using var held = await CharacterService.Lock(s);
         if (target != null && !CanHitMonster(s, target)) return;
         if (EffectiveSkillRow(s, skillId) is not { } row || !Learned(s, row) || !SkillModeAllowed(s, row)
-            || _buffs.HasForbidden(s, ForbiddenState.NormalAttack) || s.SkillCast is { Cancelled: false }) return;
+            || _buffs.HasForbidden(s, ForbiddenState.NormalAttack) || !SwingPlayedOut(s.SkillCast, Now)) return;
         var request = new CastSkillReq
         {
             SkillId = (int)GameData.Int(row, "_iID"), TargetId = target?.Uid ?? 0,
@@ -760,7 +784,9 @@ public sealed partial class CombatService
     {
         if (_eventAttacks.TryGetValue(s, out var eventAttack)
             && MonsterService.Distance(eventAttack.StartX, eventAttack.StartZ, s.Position.X, s.Position.Z) > 1.5f) _eventAttacks.Remove(s);
-        if (s.Attack is { } a && MonsterService.Distance(a.StartX, a.StartZ, s.Position.X, s.Position.Z) > 0.1f)
+        // A position correction of a few cm is no step away (inferred): a real walk, or past 1.5 m as event attacks use, ends the loop.
+        if (s.Attack is { } a && MonsterService.Distance(a.StartX, a.StartZ, s.Position.X, s.Position.Z) > 0.1f
+            && (s.Walking || a.StartedWalking || MonsterService.Distance(a.StartX, a.StartZ, s.Position.X, s.Position.Z) > 1.5f))
         {
             // Clicking an enemy from afar: the client attacks on reaching range and stops a few ms later (in-game
             // 11.10), so that first stop is where the auto-attack starts, not a step away that ends it. The 300 ms grace is inferred.

@@ -45,7 +45,7 @@ public sealed partial class CombatService
     {
         if (source.Role == null || source.Progress == null) return;
         using var held = await CharacterService.Lock(source);
-        if (!CanPlayerHit(source, target) || !CanSee(source, target) || source.SkillCast is { Cancelled: false }
+        if (!CanPlayerHit(source, target) || !CanSee(source, target) || !SwingPlayedOut(source.SkillCast, Now)
             || EffectiveSkillRow(source, skillId) is not { } row || !Learned(source, row)
             || !SkillModeAllowed(source, row) || _buffs.HasForbidden(source, ForbiddenState.NormalAttack)) return;
         var request = new CastSkillReq
@@ -86,6 +86,8 @@ public sealed partial class CombatService
                 {
                     foreach (var handler in PvpDealt) handler(source, target, effective, hp == 0);
                     foreach (var handler in PvpDealtAsync) await handler(source, target, effective, hp == 0);
+                    await ReactToHitAsync(target, null, source, row, effective);
+                    await HolyLightBreaksKyrieAsync(target, row);
                 }
                 var hit = new SkillHitInfo
                 {
@@ -147,9 +149,9 @@ public sealed partial class CombatService
             if (!CanPlayerHit(source, attack.Target) || !CanSee(source, attack.Target) || PlayerDistance(source, attack.Target) > 30
                 || MonsterService.Distance(attack.StartX, attack.StartZ, source.Position.X, source.Position.Z) > 1.5f)
             { _eventAttacks.Remove(source); continue; }
-            if (now < attack.NextSwing || source.SkillCast is { Cancelled: false } || _data.Row("SkillConfig", attack.SkillId) is not { } row
+            if (now < attack.NextSwing || !SwingPlayedOut(source.SkillCast, now) || _data.Row("SkillConfig", attack.SkillId) is not { } row
                 || PlayerDistance(source, attack.Target) > Range(row) + 1.5f) continue;
-            _eventAttacks[source] = attack with { NextSwing = now + SkillMs(source, row) };
+            _eventAttacks[source] = attack with { NextSwing = NextSwing(attack.NextSwing, now, SkillMs(source, row)) };
             _loop.PostRuntime(() => SwingEventAsync(source, attack.Target, attack.SkillId, ++_sessionIds));
         }
     }
@@ -174,13 +176,14 @@ public sealed partial class CombatService
         var attack = _character.Stats(source); var defend = _character.Stats(target);
         var a = new Fighter(attack[AttributeId.Atk], attack[AttributeId.Matk], attack[AttributeId.Hit], attack[AttributeId.Cri],
             source.Progress!.Level, AttackElement(source, row))
-        { FixedDamage = (source.GmCombat & GmCombatSwitches.FixedDamage) != 0 };
+        { FixedDamage = (source.GmCombat & GmCombatSwitches.FixedDamage) != 0, Attributes = PlayerAttributes(source, attack), Race = PlayerRace, Size = PlayerSize };
         var b = new Fighter(0, 0, 0, 0, target.Progress!.Level, 1)
         {
             Def = defend[AttributeId.Def], Mdef = defend[AttributeId.Mdef], Flee = defend[AttributeId.Flee], ResCri = defend[AttributeId.ResCri],
             FixedDamage = (target.GmCombat & GmCombatSwitches.FixedDamage) != 0,
+            Attributes = PlayerAttributes(target, defend), Race = PlayerRace, Size = PlayerSize,
         };
-        var (damage, result) = Damage(a, b, row, bonusCrit: GuardianPetRules.CriticalChance(row),
+        var (damage, result) = Damage(a, b, row, DamageBranch(source, null, row), bonusCrit: GuardianPetRules.CriticalChance(row),
             forceCrit: GuardianPetRules.CriticalAtHp(row, defend[AttributeId.Hp], defend[AttributeId.MaxHp]));
         damage = GuardianPetRules.DirectDamage(row, damage);
         damage = GuardianOutgoingDamage(source, row, damage);

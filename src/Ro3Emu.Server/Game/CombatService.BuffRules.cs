@@ -111,7 +111,7 @@ public sealed partial class CombatService
         if (role == null || role.Id != effect.TargetId || p.Dead || p.SceneLoading || p.Progress == null) return;
         long scene = p.WorldScene, generation = p.SceneGeneration;
         var stats = _character.Stats(p);
-        var defender = new Fighter(0, 0, 0, 0, p.Progress.Level, 1) { Def = stats[105], Mdef = stats[106] };
+        var defender = new Fighter(0, 0, 0, 0, p.Progress.Level, 1) { Def = stats[105], Mdef = stats[106], Attributes = PlayerAttributes(p, stats), Race = PlayerRace, Size = PlayerSize };
         var rule = effect.Rule;
         long damage = PeriodicAmount(attacker, defender, rule, buff.PileCount);
         var committed = await CommitPlayerDamageAsync(p, damage, rule.Row,
@@ -220,8 +220,8 @@ public sealed partial class CombatService
         var stats = _character.Stats(p);
         long amount = rule.HealFlat + (rule.HealRatioBp != 0 && rule.HealAttr > 0 ? stats[rule.HealAttr] * rule.HealRatioBp / 10000 : 0);
         amount *= Math.Max(1, buff.PileCount);
-        var guardian = _buffs.GuardianAttributes(p);
-        amount = ModifiedHealing(guardian, guardian, amount);
+        // The healer who put it on, when still here (a talent or potion puts it on the player itself).
+        amount = ModifiedHealing(HealerAttributes(FindPlayer(p, buff.SourceId) ?? p), stats, amount);
         long actual = Math.Min(amount, Math.Max(0, stats[101] - stats[2000]));
         if (actual <= 0) return;
         await _character.SetHpSpAsync(p, stats[2000] + actual, null);

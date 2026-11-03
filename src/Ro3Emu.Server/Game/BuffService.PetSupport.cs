@@ -28,25 +28,33 @@ public sealed partial class BuffService
     /// <summary>Active raw attribute contributions; the combat owner passes these through StatCalculator.</summary>
     /// <summary>The attribute changes of a guardian's live buffs on the unit. (inferred scope) Only these alter a monster's
     /// combat stats, damage and speed: ordinary unit buffs keep their previous, display-only behaviour.</summary>
-    internal IEnumerable<(long Id, double Value)> GuardianUnitAttributes(WorldUnit unit) =>
+    /// <summary>The buffs that count toward a unit's combat attributes: a guardian's, and a debuff (BuffConfig _iType 2) from
+    /// any source, so Petrify's PDEF% and a frost's MSPD apply to a monster. (inferred) A monster's own standing buffs
+    /// (NPCConfig _kBornEventBuff, 102 monsters carry 235 and 236) stay out, so its template stats stay as tuned.</summary>
+    private bool CountsInUnitStats(ActiveBuff buff) => buff.ExpireMs > MonsterService.NowMs
+        && (buff.IsGuardianOwned || buff.Changes.Count > 0 && BuffConfig.Get(_data, buff.ConfigId)?.Type == NegativeBuffType);
+
+    internal IEnumerable<(long Id, double Value)> UnitCombatAttributes(WorldUnit unit) =>
         _unitBuffs.TryGetValue(unit.Uid, out var buffs)
-            ? buffs.Where(b => b.IsGuardianOwned && b.ExpireMs > MonsterService.NowMs)
+            ? buffs.Where(CountsInUnitStats)
                 .SelectMany(b => b.Changes.Select(change => (change.Attr, change.Value))).ToArray()
             : [];
 
-    /// <summary>A player's live guardian buffs alone, through the same attribute calculator. (inferred scope) Healing,
-    /// SP cost and chant modifiers read these, so equipment and ordinary buffs keep their previous effect.</summary>
-    internal StatSheet GuardianAttributes(GameSession p)
+    /// <summary>A buff whose damage attributes already have their own multiplier, so a hit must not read them off the sheet too:
+    /// a guardian's (GuardianOutgoingDamage), a Pet Tower pet's (ApplyPetSupportResistance) and a totem's (TotemEffects).</summary>
+    internal static bool HasOwnDamagePath(ActiveBuff buff) => buff.IsGuardianOwned || buff.IsTotemOwned
+        || buff.SourceId is >= TowerPetUnit.UidBase and < TowerPetUnit.UidLimit;
+
+    /// <summary>What the player's sheet holds from those buffs, to take off it.</summary>
+    internal StatSheet OwnDamagePathAttributes(GameSession p)
     {
         var raw = new Dictionary<int, double>();
-        long now = MonsterService.NowMs;
-        foreach (var buff in p.Buffs.Where(b => b.IsGuardianOwned && b.ExpireMs > now))
+        foreach (var buff in p.Buffs.Where(HasOwnDamagePath))
             foreach (var (attr, value) in buff.Changes) raw[(int)attr] = raw.GetValueOrDefault((int)attr) + value;
         return StatCalculator.Compute(raw, _data);
     }
 
-    internal bool HasGuardianUnitBuffs(WorldUnit unit) => _unitBuffs.TryGetValue(unit.Uid, out var buffs)
-        && buffs.Any(b => b.IsGuardianOwned && b.ExpireMs > MonsterService.NowMs);
+    internal bool HasUnitCombatBuffs(WorldUnit unit) => _unitBuffs.TryGetValue(unit.Uid, out var buffs) && buffs.Any(CountsInUnitStats);
 
     public IEnumerable<(long Id, double Value)> UnitAttributes(WorldUnit unit) =>
         _unitBuffs.TryGetValue(unit.Uid, out var buffs)
