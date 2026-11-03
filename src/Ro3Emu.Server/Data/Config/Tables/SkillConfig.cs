@@ -29,6 +29,7 @@ public readonly partial record struct SkillConfig(JsonElement Row)
     [ConfigField("_iIfAutoAtk")] public partial long IfAutoAtk { get; }
     [ConfigField("_iImportantSkill")] public partial long ImportantSkill { get; }
     [ConfigField("_iInitialLevel")] public partial long InitialLevel { get; }
+    [ConfigField("_iInterruptedType")] public partial long InterruptedType { get; }
     [ConfigField("_iIsNormalAtk")] public partial long IsNormalAtk { get; }
 
     /// <summary>
@@ -100,6 +101,14 @@ public readonly partial record struct SkillConfig(JsonElement Row)
         node["_kBuff1"] = new System.Text.Json.Nodes.JsonArray();
         node["_kBuff2"] = new System.Text.Json.Nodes.JsonArray();
         node["_kShowDmg"] = new System.Text.Json.Nodes.JsonArray();
+        return JsonSerializer.SerializeToElement(node);
+    }
+
+    /// <summary>This row without its caster buffs, everything else kept: a later hit of a cast whose start applied them.</summary>
+    public JsonElement WithoutBuff1()
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(Row.GetRawText())!.AsObject();
+        node["_kBuff1"] = new System.Text.Json.Nodes.JsonArray();
         return JsonSerializer.SerializeToElement(node);
     }
 

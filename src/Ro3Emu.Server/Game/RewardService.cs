@@ -11,7 +11,7 @@ namespace Ro3Emu.Server.Game;
 /// Kill rewards: the monster's drop chains are rolled for the killer
 /// (NPCConfig._iDrop / _iNormalDrop → MultiverseGroupConfig → NPCDropConfig[env 0 reduced / env 1 Bonus Time, inferred]
 /// / additive NpcNormalDropConfig → DropPoolConfig slots → weighted DropGroupConfig rows). Item 100 rows are Base EXP,
-/// scaled by LvExpCorrectionConfig; Job EXP equals Base EXP (inferred). Currencies go to the currency map, everything
+/// scaled by LvExpCorrectionConfig; Job EXP is CharacterService.JobExpFromBase of it. Currencies go to the currency map, everything
 /// else to the bag; then one 31322 drop notify makes
 /// the client animate the loot from the corpse.
 /// </summary>
@@ -34,7 +34,7 @@ public sealed class RewardService
     /// Other kills use environment 0, preserving ordinary rewards (localization 10960000077; mapping inferred).</summary>
     public Func<GameSession, MonsterUnit, Task<bool>>? QualifiesForBonus { get; set; }
     /// <summary>Actual committed kill drops, after EXP correction; excludes GM, quest and other item grants.</summary>
-    public List<Func<GameSession, MonsterUnit, IReadOnlyList<(int Entry, long Count)>, Task>> KillDropsGranted { get; } = new();
+    public List<Func<GameSession, MonsterUnit, IReadOnlyList<(int Entry, long Count)>, Task>> KillDropsGranted { get; } = [];
     internal Action<GameSession, MonsterUnit, RewardSettlement, IReadOnlyList<(int Entry, int Count)>, long, long>? StageAfkKill { get; set; }
     /// <summary>Monster Hunt: the area drop rolled with an ordinary field kill (MonsterHuntService).</summary>
     internal List<Func<GameSession, MonsterUnit, IEnumerable<(int Entry, int Count)>>> ExtraKillDrops { get; } = [];
@@ -64,7 +64,7 @@ public sealed class RewardService
         /// <summary>The bag items the committed kill created (auto-decomposed ones are gone).</summary>
         internal List<InvItem> Granted = [];
     }
-    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<MonsterUnit, KillOutcome> _outcomes = new();
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<MonsterUnit, KillOutcome> _outcomes = [];
     internal Func<GameSession, MonsterUnit, (List<(int Entry, int Count)> Items, long BaseExp, long JobExp)>? ResolveKillForTest { get; set; }
 
     /// <summary>Resolve and admit once before any lethal hit/death packet. A rejected pre-admission hit is
@@ -103,6 +103,8 @@ public sealed class RewardService
             if (!_outcomes.TryGetValue(monster, out var outcome))
             {
                 var (items, baseExp, jobExp) = ResolveKill(player, monster, bonus);
+                // An advanced pass raises a currency's drops (PassPrivileges.CopperEffAdd).
+                items = PassPrivileges.BoostDrops(_data, player, items);
                 outcome = new KillOutcome { Role = role, Items = items, BaseExp = baseExp, JobExp = jobExp };
                 _outcomes.Add(monster, outcome);
             }
@@ -163,8 +165,9 @@ public sealed class RewardService
             baseExp = Math.Max(1, baseExp * _teams.ExpBonus(player) / 10000);
             baseExp = ScaleFieldExp(monster.Template.NpcId, player.Progress!.Level, baseExp);
         }
-        // BaseExpAddConfig catch-up below the server level raises Base EXP only (CharacterService.LevelRules).
-        return (items, _character.WithPursueBonus(player.Progress!.Level, baseExp), baseExp);
+        // BaseExpAddConfig catch-up below the server level (CharacterService.LevelRules).
+        baseExp = _character.WithPursueBonus(player.Progress!.Level, baseExp);
+        return (items, baseExp, _character.JobExpFromBase(baseExp));
     }
 
     /// <summary>FieldExpRates (inferred): an open-field monster (NPCConfig._iWildMonsters 1) pays the rate of the killer's level.</summary>
@@ -300,17 +303,19 @@ public sealed class RewardService
     /// Every _iDropPoolN of a row; each pool slot [group, chance per million, rolls, picks] is rolled "rolls" times
     /// independently (MVP first-strike pool 21001 = [2020, 100%, 30, 1] = 30 x 1000 Minted Coin).
     /// </summary>
-    /// <summary>A kill's pools: <paramref name="monsterLevel"/> is the slain monster's level (DropAttenuationConfig).</summary>
+    /// <summary>A kill's pools: <paramref name="monsterLevel"/> is the slain monster's level (DropAttenuationConfig); a
+    /// DropGroupConfig row with an _iQuestLimit drops only while the killer has that quest under way.</summary>
     private void RollPools(JsonElement row, GameSession player, List<(int, int)> drops, int monsterLevel)
     {
-        foreach (long poolId in DropPools(row)) RollPool(poolId, player.Progress!, drops, null, monsterLevel);
+        foreach (long poolId in DropPools(row))
+            RollPool(poolId, player.Progress!, drops, null, monsterLevel, quest => TaskService.IsActive(player, quest));
     }
 
     private void RollPool(long poolId, GameSession player, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null)
         => RollPool(poolId, player.Progress!, drops, bound);
 
     private void RollPool(long poolId, RoleProgress progress, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null,
-        int monsterLevel = DropAttenuation.NoMonster)
+        int monsterLevel = DropAttenuation.NoMonster, Func<long, bool>? questActive = null)
     {
         if (_data.Row("DropPoolConfig", poolId) is not { } pool) return;
         foreach (var (group, chance, rolls, picks) in PoolSlots(pool))
@@ -318,7 +323,7 @@ public sealed class RewardService
             for (int r = 0; r < rolls; r++)
             {
                 if (_random.NextDouble() * 1_000_000 >= chance) continue;
-                for (int i = 0; i < picks; i++) PickFromGroup(group, progress, drops, bound, monsterLevel);
+                PickFromGroup(group, progress, drops, bound, monsterLevel, questActive, picks);
             }
         }
     }
@@ -331,7 +336,7 @@ public sealed class RewardService
     {
         var drops = new List<(int, int)>();
         if (AwardPool(_data, multiverseId) is var pool and > 0) RollPool(pool, player, drops);
-        return drops.GroupBy(d => d.Item1).Select(g => (g.Key, g.Sum(d => d.Item2))).ToList();
+        return [.. drops.GroupBy(d => d.Item1).Select(g => (g.Key, g.Sum(d => d.Item2)))];
     }
 
     /// <summary>The DropPoolConfig id an award id rolls (MultiverseGroupConfig → AwardConfig[0]._iDropPool), else 0.
@@ -344,8 +349,8 @@ public sealed class RewardService
     public List<(int Entry, int Count, int Bind)> RollPoolBound(long poolId, RoleProgress progress)
     {
         var bound = new List<(int Entry, int Count, int Bind)>();
-        RollPool(poolId, progress, new List<(int, int)>(), bound);
-        return bound.GroupBy(x => (x.Entry, x.Bind)).Select(g => (g.Key.Entry, g.Sum(x => x.Count), g.Key.Bind)).ToList();
+        RollPool(poolId, progress, [], bound);
+        return [.. bound.GroupBy(x => (x.Entry, x.Bind)).Select(g => (g.Key.Entry, g.Sum(x => x.Count), g.Key.Bind))];
     }
 
     /// <summary>Stage-box pool draw with each chosen DropGroupConfig._iBind retained (draw rules inferred).</summary>
@@ -360,9 +365,9 @@ public sealed class RewardService
         {
             var row = raw.ValueKind == JsonValueKind.Array && raw.GetArrayLength() > 0 ? raw[0] : raw;
             if (row.ValueKind == JsonValueKind.Object && GameData.Int(row, "_iDropPool") is var pool and > 0)
-                RollPool(pool, progress, new List<(int, int)>(), bound);
+                RollPool(pool, progress, [], bound);
         }
-        return bound.GroupBy(x => (x.Entry, x.Bind)).Select(g => (g.Key.Entry, g.Sum(x => x.Count), g.Key.Bind)).ToList();
+        return [.. bound.GroupBy(x => (x.Entry, x.Bind)).Select(g => (g.Key.Entry, g.Sum(x => x.Count), g.Key.Bind))];
     }
 
     /// <summary>
@@ -393,39 +398,39 @@ public sealed class RewardService
             }
         if (GameData.Int(row, "_iDropPool") is var pool and > 0)
             RollPool(pool, progress, [], goods);
-        return goods.GroupBy(g => (g.Entry, g.Bind)).Select(g => (g.Key.Entry, g.Sum(x => x.Count), g.Key.Bind)).ToList();
+        return [.. goods.GroupBy(g => (g.Entry, g.Bind)).Select(g => (g.Key.Entry, g.Sum(x => x.Count), g.Key.Bind))];
     }
 
     private void PickFromGroup(long group, GameSession player, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null)
         => PickFromGroup(group, player.Progress!, drops, bound);
 
+    /// <summary>
+    /// Up to <paramref name="picks"/> different rows by weight (DropPicks). A row with _iQuestLimit is a quest drop (DropGroupConfig 144: Card: Poring, _iQuestLimit 10102100,
+    /// the quest the dropping Egg Thief wave plays): it is a candidate only when <paramref name="questActive"/> says the
+    /// quest is accepted and not yet delivered (inferred); without one (awards, AFK stages) it never is.
+    /// </summary>
     internal void PickFromGroup(long group, RoleProgress progress, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null,
-        int monsterLevel = DropAttenuation.NoMonster)
+        int monsterLevel = DropAttenuation.NoMonster, Func<long, bool>? questActive = null, int picks = 1)
     {
         if (_data.Row("DropGroupConfig", group) is not { ValueKind: JsonValueKind.Array } rows) return;
         var p = progress;
         var candidates = rows.EnumerateArray().Where(r =>
         {
-            if (GameData.Int(r, "_iWeights") <= 0 || GameData.Int(r, "_iQuestLimit") != 0 || GameData.Int(r, "_iActivityid") != 0) return false;
+            if (GameData.Int(r, "_iWeights") <= 0 || GameData.Int(r, "_iActivityid") != 0) return false;
+            if (GameData.Int(r, "_iQuestLimit") is var quest and not 0 && questActive?.Invoke(quest) != true) return false;
             long min = GameData.Int(r, "_iMinLevelLimit"), max = GameData.Int(r, "_iMaxLevelLimit");
             if (p.Level < min || max > 0 && p.Level > max) return false;
             return !r.TryGetProperty("_iJobLimit", out var jobs) || jobs.ValueKind != JsonValueKind.Array || jobs.GetArrayLength() == 0
                    || jobs.EnumerateArray().Any(j => GameData.Number(j) == p.Career);
         }).ToList();
-        long total = candidates.Sum(r => GameData.Int(r, "_iWeights"));
-        if (total <= 0) return;
-        long roll = (long)(_random.NextDouble() * total);
-        foreach (var r in candidates)
+        foreach (var r in DropPicks.Distinct(candidates, picks, _random.NextInt64))
         {
-            roll -= GameData.Int(r, "_iWeights");
-            if (roll >= 0) continue;
             int count = _random.Next((int)GameData.Int(r, "_iMinNumber"), (int)Math.Max(GameData.Int(r, "_iMinNumber"), GameData.Int(r, "_iMaxNumber")) + 1);
             int entry = (int)GameData.Int(r, "_kDropItem");
             int amount = _attenuation.Apply(r, Math.Max(1, count), p.Level, monsterLevel, _random);
-            if (amount <= 0) return;
+            if (amount <= 0) continue;
             drops.Add((entry, amount));
             bound?.Add((entry, amount, (int)GameData.Int(r, "_iBind")));
-            return;
         }
     }
 

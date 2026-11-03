@@ -16,6 +16,24 @@ public sealed class ServerOptions
         : System.Net.IPAddress.TryParse(PublicHost, out var host) && System.Net.IPAddress.IsLoopback(host) ? System.Net.IPAddress.Loopback
         : System.Net.IPAddress.Any;
 
+    /// <summary>The web panel's listen address: its own bind address, else the server's.</summary>
+    public System.Net.IPAddress PanelListenAddress() =>
+        Panel.BindAddress is { Length: > 0 } bind ? System.Net.IPAddress.Parse(bind) : ListenAddress();
+
+    /// <summary>
+    /// Only this machine reaches the server: the client is told a loopback address, the game ports and the panel listen
+    /// on loopback and no proxy serves the panel (<see cref="Ro3Emu.Panel.PanelOptions.PublicFacing"/>). Local play and
+    /// the tests. A public <see cref="PublicHost"/> with a loopback bind is a tunnel (frp, ssh -R, nginx stream): it
+    /// delivers strangers to loopback. An address that does not parse counts as public, so a typo never opens GM.
+    /// </summary>
+    public bool LocalOnly()
+    {
+        if (!System.Net.IPAddress.TryParse(PublicHost, out var told) || !System.Net.IPAddress.IsLoopback(told)) return false;
+        if (BindAddress is { Length: > 0 } bind && !System.Net.IPAddress.TryParse(bind, out _)) return false;
+        if (Panel.BindAddress is { Length: > 0 } panel && !System.Net.IPAddress.TryParse(panel, out _)) return false;
+        return System.Net.IPAddress.IsLoopback(ListenAddress()) && !Panel.PublicFacing(PanelListenAddress());
+    }
+
     /// <summary>The voice relay serves whenever a port is set (the stream is sealed, so off loopback too).</summary>
     public bool VoiceServed() => Voice.Port > 0;
 
@@ -35,6 +53,12 @@ public sealed class ServerOptions
     /// Reconstructed/ro1-aggressive-monsters.json) attack on sight like the client's AIConfig 20000004 monsters. An RO1
     /// reference, not client evidence (inferred); on by default as a trial (owner's decision, 28.10), off changes nothing.</summary>
     public bool Ro1AggressiveMonsters { get; set; } = true;
+
+    /// <summary>The RO1 aggression stays off for a monster on an open field (not a dungeon, town or sandbox) whose own field
+    /// spawns hold a common monster (MonsterService.Ro1GateMinSharePercent of the population) more than this many levels
+    /// below it (Payon Forest: Greatest General 55 and Elder Willow 34 among Horns 16), so new characters can follow the
+    /// story there; bosses and MVPs are never gated; 0 or negative: no gate. (inferred, owner's decision 31.10)</summary>
+    public int Ro1AggressiveMaxLevelGap { get; set; } = 15;
 
     /// <summary>Monsters whose Ragnarok Online 1 counterpart is much tougher than the client makes them get the RO1 HP
     /// (Reconstructed/ro1-monster-hp.json: the Pupa, 4 HP in the client, 427 here). An RO1 reference, not
@@ -56,8 +80,21 @@ public sealed class ServerOptions
     /// </summary>
     public string? GameDataDir { get; set; }
 
-    /// <summary>Walk check against the client's nav grid: "off", "log" (report only) or "enforce" (snap back).</summary>
-    public string WalkCheck { get; set; } = "log";
+    /// <summary>
+    /// Walk check (SceneService.AcceptWalkAsync): the distance budget of the speed attribute and the client's nav grid.
+    /// "enforce" (default) snaps a refused walk back to the last good position, "log" only reports it (CheatMonitor), "off"
+    /// skips the check. A walk to a position that is not a number is refused in every mode but "off".
+    /// </summary>
+    public string WalkCheck { get; set; } = "enforce";
+
+    /// <summary>
+    /// Travel check (SceneService.Travel): which raw 30012 and 30131 requests a client may send. "enforce" (default) refuses
+    /// the others, "log" counts them and lets them through (CheatMonitor), "off" skips the check.
+    /// </summary>
+    public string TravelCheck { get; set; } = "enforce";
+
+    /// <summary>Anti-cheat limits and the web panel's suspicious-activity thresholds (CheatMonitor, docs/systems/anticheat.md).</summary>
+    public AntiCheatOptions AntiCheat { get; set; } = new();
 
     public int ClusterId { get; set; } = 1;
 
@@ -90,6 +127,9 @@ public sealed class ServerOptions
     /// <summary>Battle pass policy: the premium track is free for now.</summary>
     public PassOptions Pass { get; set; } = new();
 
+    /// <summary>Paid products and top-ups: free for now (owner decision 2026-10-31).</summary>
+    public ShopOptions Shop { get; set; } = new();
+
     /// <summary>
     /// Accounts allowed to use GM commands in game ("!" lines in chat, the client's GM panel, 1031/1034). Empty:
     /// <see cref="GmOpenWhenEmpty"/> decides. docs/guide/gm-access.md.
@@ -98,9 +138,10 @@ public sealed class ServerOptions
 
     /// <summary>
     /// What an empty <see cref="GmAccounts"/> means in game: true = every account has GM (research server, tests,
-    /// local play), false = nobody has GM. Left unset, ServerHost decides from the host environment: false when it was
-    /// set to Production explicitly (ASPNETCORE_ENVIRONMENT, DOTNET_ENVIRONMENT or --environment), true otherwise. The
-    /// loopback HTTP POST /ro3emu/gm (the operator's tools) keeps the old rule either way: empty = every account.
+    /// local play), false = nobody has GM. Left unset, ServerHost decides: true only on a server that only this machine
+    /// reaches (<see cref="LocalOnly"/>) and that was not set to Production explicitly (ASPNETCORE_ENVIRONMENT,
+    /// DOTNET_ENVIRONMENT or --environment); false on a public bind, behind a proxy, or in Production. The loopback
+    /// HTTP POST /ro3emu/gm (the operator's tools) keeps the old rule either way: empty = every account.
     /// </summary>
     public bool? GmOpenWhenEmpty { get; set; }
 
@@ -112,6 +153,9 @@ public sealed class ServerOptions
 
     /// <summary>Database copies in DataDir/backups (DatabaseBackup).</summary>
     public BackupOptions Backup { get; set; } = new();
+
+    /// <summary>The web panel's update manager (Updates.UpdateManager, docs/guide/panel.md).</summary>
+    public UpdateOptions Updates { get; set; } = new();
 
     /// <summary>How long economic receipts keep their payload and outcome bytes (ReceiptRetention).</summary>
     public ReceiptRetentionOptions ReceiptRetention { get; set; } = new();
@@ -126,6 +170,23 @@ public sealed class ServerOptions
 
     /// <summary>Tests: the credential limit and the gift code address limit apply to loopback too.</summary>
     public bool LoginLimitIncludesLoopback { get; set; }
+
+    /// <summary>
+    /// The operator token the loopback tools (/ro3emu/gm, /shutdown, /online, /reports, /metrics) must send in
+    /// X-Ro3Emu-Operator (Http.OperatorToken). Unset: a random one, kept in DataDir/operator.token. Set (at least 32
+    /// characters): this one, also written to that file, for scripts that already hold a secret.
+    /// </summary>
+    public string? OperatorToken { get; set; }
+
+    /// <summary>
+    /// A game login (SDK login) with an account name that has no account is refused instead of creating the account,
+    /// so accounts come only from the web panel's sign-up (a closed test). The client shows its wrong-credentials
+    /// popup, as for a wrong password. Off: the first login creates the account, as before.
+    /// </summary>
+    public bool RefuseUnknownAccounts { get; set; }
+
+    /// <summary>Chat flood protection (ChatService.Flood.cs). Off by default.</summary>
+    public ChatFloodOptions ChatFlood { get; set; } = new();
 
     /// <summary>
     /// Gift code attempts (POST /gift-card/use/v2, docs/systems/gift-codes.md) one remote address, and separately one
@@ -214,6 +275,13 @@ public sealed class ServerOptions
     /// client data gives the Crests no source; 0 turns it off.
     /// </summary>
     public int TitleCrestPercent { get; set; } = 25;
+
+    /// <summary>
+    /// (inferred) Every Tavern active day (20 minutes in a room) also brings one higher drink: Grape Wine every 7th
+    /// active day, Craft Brew every 3rd, Gingerbread otherwise (TavernService). The client data gives only Hot Cocoa a
+    /// source (the daily quest's award); false leaves it at that.
+    /// </summary>
+    public bool TavernDayDrinks { get; set; } = true;
 
     /// <summary>
     /// (inferred) Seconds from a raid boss fight's start to its enrage, against which the Final Trial "more than N minutes
@@ -334,6 +402,63 @@ public sealed class FeedbackOptions
 }
 
 /// <summary>
+/// Ro3Emu:ChatFlood (Game.ChatFloodGuard): per-account chat limits for a public server, off by default. The numbers
+/// stay above the client's own channel cooldowns (ChatChannelConfig _iCD: world 5 s), so an unmodified client typing
+/// at its fastest is never refused. GM accounts (Ro3Emu:GmAccounts) are exempt.
+/// </summary>
+public sealed class ChatFloodOptions
+{
+    public bool Enabled { get; set; }
+
+    /// <summary>The window the two line budgets count in.</summary>
+    public int WindowSeconds { get; set; } = 10;
+
+    /// <summary>Lines per window on the open channels: world, map, recruitment and every other channel anyone can join.</summary>
+    public int OpenLines { get; set; } = 5;
+
+    /// <summary>Lines per window on whispers, party, guild and friend-group chat, counted apart from the open channels.</summary>
+    public int PrivateLines { get; set; } = 10;
+
+    /// <summary>A line whose text (letter case and spaces aside) went to the same channel or player this many seconds
+    /// before is dropped; 0 turns the check off.</summary>
+    public int DuplicateSeconds { get; set; } = 30;
+
+    /// <summary>How long an account that went past a budget cannot chat.</summary>
+    public int MuteSeconds { get; set; } = 60;
+}
+
+/// <summary>
+/// The update manager of the web panel's Server control (Updates.UpdateManager): the releases on GitHub, a checked
+/// download and an install or rollback planned like a restart (docs/guide/panel.md, Updates).
+/// </summary>
+public sealed class UpdateOptions
+{
+    /// <summary>Ask GitHub for new releases: when the page asks and every <see cref="CheckHours"/>. Off: no request leaves
+    /// the server and the page shows the installed version only.</summary>
+    public bool Check { get; set; } = true;
+
+    /// <summary>The GitHub repository whose releases are offered (owner/name).</summary>
+    public string Repository { get; set; } = "aethai/ro3emu-server";
+
+    /// <summary>Hours between two checks in the background; at least 1.</summary>
+    public double CheckHours { get; set; } = 6;
+
+    /// <summary>The GitHub API's address. Another one (a local copy of the releases list) is for testing; its own
+    /// address may then serve the downloads too.</summary>
+    public string ApiUrl { get; set; } = "https://api.github.com";
+
+    /// <summary>
+    /// How the server is run, which decides whether the page can install: auto (found from the environment), systemd,
+    /// service (a Windows service wrapper that restarts it), docker, app (RO3Emu.exe or the launcher) or manual.
+    /// </summary>
+    public string Hosting { get; set; } = "auto";
+
+    /// <summary>The release folder the server runs from (the one with server/ and RO3Emu). Empty: the folder above
+    /// the server's own executable when it is a release's.</summary>
+    public string? InstallDir { get; set; }
+}
+
+/// <summary>
 /// Database copies (DatabaseBackup): one at start and one every <see cref="IntervalHours"/>. The receipt tables make the
 /// database grow with play, and every copy is a whole database, so all but the newest <see cref="Uncompressed"/> are
 /// gzip-compressed (about a quarter of the size).
@@ -349,6 +474,17 @@ public sealed class BackupOptions
     /// <summary>Newest copies left as plain .db files, ready to restore or open; at least 1. Set it to
     /// <see cref="Keep"/> to compress nothing.</summary>
     public int Uncompressed { get; set; } = 2;
+
+    /// <summary>Disk space a backup leaves free for the live database to grow (inferred; server tuning). When a copy and this
+    /// do not fit, the oldest copies go first (never the newest two), or the backup is skipped and logged as critical.</summary>
+    public int ReserveMegabytes { get; set; } = 1024;
+
+    /// <summary>From this database size a restart makes no copy while the newest is younger than <see cref="IntervalHours"/>,
+    /// and a scheduled copy is checked once per <see cref="BigDatabaseCheckHours"/> (inferred; server tuning). 0 turns this off.</summary>
+    public int BigDatabaseMegabytes { get; set; } = 4096;
+
+    /// <summary>Hours between integrity checks of scheduled copies on a big database.</summary>
+    public int BigDatabaseCheckHours { get; set; } = 24;
 }
 
 /// <summary>
@@ -362,6 +498,10 @@ public sealed class VoiceOptions
 
     /// <summary>Members a single voice room (one party/team) may hold.</summary>
     public int MaxRoomSize { get; set; } = 40;
+
+    /// <summary>Listeners a Tavern room's voice may hold. The room itself takes PublicParamConfig.BarroomPersonNum (1000)
+    /// members; (inferred) the relay bounds its own fan-out, everyone past this keeps the room's text chat.</summary>
+    public int MaxTavernRoomSize { get; set; } = 200;
 
     /// <summary>Audio frames a connection may send per second before the token bucket drops the extra ones.</summary>
     public int FramesPerSecond { get; set; } = 50;
@@ -397,6 +537,19 @@ public sealed class VoiceOptions
 
     /// <summary>Seconds without any frame before an authed connection is closed as idle. A test host lowers this.</summary>
     public int IdleTimeoutSeconds { get; set; } = 30;
+}
+
+/// <summary>
+/// The client's cash shop (2001 CREATE_ORDER from the top-up panel, the pass and the month card): on this server a purchase
+/// costs nothing (owner decision 2026-10-31, docs/systems/shop-currency.md). Off: every order is refused as unavailable.
+/// </summary>
+public sealed class ShopOptions
+{
+    /// <summary>Products, packs and top-ups are granted without payment.</summary>
+    public bool FreeProducts { get; set; } = true;
+
+    /// <summary>Free top-ups of one package a role may take per game day (inferred cap, at least 1).</summary>
+    public int FreeTopUpsPerDay { get; set; } = 1;
 }
 
 /// <summary>Both off by default so the tests keep the original's pass; a realm turns them on (docs/systems/activities-battlepass-monthcard.md).</summary>

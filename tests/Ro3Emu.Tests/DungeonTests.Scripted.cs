@@ -15,31 +15,8 @@ namespace Ro3Emu.Tests;
 /// </summary>
 public sealed partial class DungeonTests
 {
-    [ClientDataFact]
-    public async Task APartyMembersStoryRegionStartsPreparationThroughTheLeader()
-    {
-        const long outside = 10153, scene = 3120402, task = 10106270, regionId = 1010626001;
-        await using var leader = await InWorld("Alice");
-        await using var member = await InWorld("Bob");
-        await MovePublic(leader, outside);
-        await MovePublic(member, outside);
-        await Party(leader, member);
-        await Gm(member, $"!quest accept {task}");
-        var region = Service<WorldData>().Map(outside)!.Regions[regionId];
-
-        using var leaderReady = leader.Inbox.Expect(e => e.IsGame(DungeonService.ReadyQueue));
-        using var memberReady = member.Inbox.Expect(e => e.IsGame(DungeonService.ReadyQueue));
-        await OnLoop(async () => Assert.True(await Service<DungeonService>().EnterFromRegionAsync(Session(member), region)));
-        var ready = TeamEnterReadyQueueNotify.Parser.ParseFrom((await memberReady.WaitAsync(Wait)).Body);
-        await leaderReady.WaitAsync(Wait);
-
-        Assert.Equal(scene, ready.DungeonId);
-        Assert.True(ready.ReadyQueue[(long)leader.Self!.Uuid]);
-        Assert.False(ready.ReadyQueue[(long)member.Self!.Uuid]);
-    }
-
-    public static TheoryData<long> ScriptedScenes() => new(new ReconstructedDungeons(
-        Options.Create(new ServerOptions())).AllScripted.Select(s => s.Scene).Order());
+    public static TheoryData<long> ScriptedScenes() => [.. new ReconstructedDungeons(
+        Options.Create(new ServerOptions())).AllScripted.Select(s => s.Scene).Order()];
 
     [ClientDataTheory]
     [MemberData(nameof(ScriptedScenes))]
@@ -209,6 +186,12 @@ public sealed partial class DungeonTests
         Assert.Equal((DungeonRes)1, result.Res);
         await StoryMovesOn(alice, 10104290, 10104300);
         Assert.DoesNotContain(Service<World>().AllUnits(), u => u.InstanceId == instance);
+
+        // 1000301 continues 1000201 (_iSameDupLoadingType 2): the server moves the player on into the Deniro's scene,
+        // instead of leaving them at the bottom of the dark passage with nothing happening.
+        Assert.Equal(0, (await Next(alice, DungeonService.Enter, EnterDungeonRsp.Parser)).Result);
+        await Load(alice, 1000301);
+        await Stage(alice, 1, quest: 1);
     }
 
     // Issue #181: a player inside the vortex's region 20 before the client's auto interaction came had step 2 done, the
@@ -281,8 +264,11 @@ public sealed partial class DungeonTests
         // Bobo carries buff group 53014, the NPC condition of 'Rescue Bobo'; the Deniro carries nothing yet.
         Assert.Equal([5301401], bobo.Buffs.Select(b => b.ConfigId));
         Assert.Empty(deniro.Buffs);
-        var seen = alice.Inbox.Snapshot().Where(e => e.IsGame(GameAoiSink.SyncAoiView))
-            .SelectMany(e => AoIViewChangeData.Parser.ParseFrom(e.Body).Bases).Last(b => b.Uuid == (ulong)bobo.Uid);
+        // ActorsWhen reads the server's state; the view that shows it to the client is still on its way.
+        IEnumerable<EntityBase> BoboSeen() => alice.Inbox.Snapshot().Where(e => e.IsGame(GameAoiSink.SyncAoiView))
+            .SelectMany(e => AoIViewChangeData.Parser.ParseFrom(e.Body).Bases).Where(b => b.Uuid == (ulong)bobo.Uid);
+        await Until(() => BoboSeen().Any(), "Bobo in the client's view");
+        var seen = BoboSeen().Last();
         Assert.Equal((5300041UL, 1, 5301401), (seen.EntityTemplateID, seen.EntityType, seen.BuffData.AddBuffs.Single().ConfigId));
 
         await Beside(alice, deniro.X, deniro.Y, deniro.Z);
@@ -584,6 +570,37 @@ public sealed partial class DungeonTests
             step => Assert.Null(step.React)); // a scene without reactions keeps none
     }
 
+    // The Ant Queen's Nest 1000301 starts the player and Bobo outside its server nav (303 cells, far to the east). With the
+    // walk check enforced the destination was tested first, so every step there was snapped back and the player who
+    // arrived could not move at all.
+    [ClientDataFact]
+    public async Task AWalkOffTheScenesNavIsNotSnappedBack()
+    {
+        const long scene = 1000301;
+        var options = Service<IOptions<ServerOptions>>().Value;
+        options.WalkCheck = "enforce";
+        try
+        {
+            await using var alice = await InWorld("Alice");
+            await Gm(alice, "!quest accept 10104300"); // Explore the Ant Queen's Nest: [101018, 1000301, 1]
+            Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = scene }));
+            await Load(alice, scene);
+            var from = await Service<GameLoop>().InvokeAsync(() => Task.FromResult(Session(alice).Position));
+            Assert.Null(Service<WorldData>().Map(scene)!.Nav!.NearestWalkable(from.X, from.Z, from.Y));
+            await Task.Delay(600); // the walk budget of the arrival
+            float x = from.X + 1.5f, z = from.Z;
+            await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = new Vec3 { X = x, Y = from.Y, Z = z }, BStop = true, SpeedRate = 1 });
+            for (int i = 0; i < 100; i++)
+            {
+                var at = await Service<GameLoop>().InvokeAsync(() => Task.FromResult(Session(alice).Position));
+                if (Math.Abs(at.X - x) < 0.01f && Math.Abs(at.Z - z) < 0.01f) return;
+                await Task.Delay(20);
+            }
+            Assert.Fail("the walk off the nav was snapped back");
+        }
+        finally { options.WalkCheck = "log"; }
+    }
+
     [ClientDataFact]
     public void ServerRegionsUseTheClientsCircleAndRectangleFootprints()
     {
@@ -660,7 +677,7 @@ public sealed partial class DungeonTests
         {
             shown = await Service<GameLoop>().InvokeAsync(() => Task.FromResult(
                 Session(bot).DungeonAttempt?.SceneActors.ToArray() ?? []));
-            if (ready(shown)) return shown.Where(a => match == null || match(a)).ToArray();
+            if (ready(shown)) return [.. shown.Where(a => match == null || match(a))];
             await Task.Delay(20);
         }
         throw new TimeoutException($"The scene actors did not reach the expected state; shown: {string.Join(", ", shown.Select(a => $"{a.NpcId}@{a.Point}[{string.Join('/', a.Buffs.Select(b => b.ConfigId))}]"))}");

@@ -102,7 +102,8 @@ public sealed partial class TaskService
         character.GetKillTaskParticipantKeys = GetKillTaskParticipantKeys;
         character.StageKillTaskObligations = StageKillTaskObligations;
         ExtraTasks.Add(DungeonRunTasks); // TaskService.DungeonTasks.cs
-        QuestDelivered.Add(AddFactionPoints); // 101022 (TaskService.MiscTargets.cs)
+        QuestDelivered.Add(AddFactionPoints); // 101022 (TaskService.FactionQuest.cs)
+        combat.PlayerKilled.Add(OnFactionPlayerKilledAsync); // 101023
     }
 
     /// <summary>Delivered = completeTaskNum &gt; 0 or status 4 (the client's CheckTaskDeliveryed). Without quest state: true.</summary>
@@ -110,7 +111,7 @@ public sealed partial class TaskService
     /// Tasks the client shows that are not quests of this service (the pass challenges, NewActivityService.PassPlay):
     /// added to every 5027 so the dataset's diff never drops them. They are not in <see cref="GameSession.Tasks"/>.
     /// </summary>
-    public List<Func<GameSession, IEnumerable<TaskInfo>>> ExtraTasks { get; } = new();
+    public List<Func<GameSession, IEnumerable<TaskInfo>>> ExtraTasks { get; } = [];
 
     /// <summary>5027: the role's quests plus <see cref="ExtraTasks"/>, as the change since the last send.</summary>
     public Task SyncTasksAsync(GameSession session)
@@ -126,6 +127,10 @@ public sealed partial class TaskService
         session.Tasks is not { } t
         || (t.CompleteTaskNum.TryGetValue(taskId, out int n) && n > 0)
         || (t.Infos.TryGetValue(taskId, out var info) && info.Status == Delivered);
+
+    /// <summary>The quest is accepted and not yet delivered (Running or Finish).</summary>
+    public static bool IsActive(GameSession session, long taskId) =>
+        session.Tasks is { } t && t.Infos.TryGetValue(taskId, out var info) && info.Status is Running or Finished;
 
     // ---- login ----
 
@@ -202,18 +207,36 @@ public sealed partial class TaskService
                 || (npcId != 0 && t[1] == npcId)) ? 1 : 0);
     }
 
-    /// <summary>31209 CLIENT_ENTERAREA: target 104003 [map, area] (the region itself is trusted to the client).</summary>
-    public Task OnAreaAsync(GameSession session, ClientEnterAreaReq req) =>
-        ProgressAsync(session, TArea, t => t.Length >= 3 && t[1] == session.SceneEntry && t[2] == req.AreaId ? 1 : 0);
+    /// <summary>
+    /// 31209 CLIENT_ENTERAREA: target 104003 [map, area]. The client tests the region itself; the server holds it to the
+    /// player being near that region (SceneService.NearRegion), so a report from across the map is refused and counted.
+    /// </summary>
+    public Task OnAreaAsync(GameSession session, ClientEnterAreaReq req)
+    {
+        if (!_scene.NearRegion(session, req.AreaId))
+        {
+            _scene.Cheats.Refused(session, CheatMonitor.QuestArea,
+                $"area {req.AreaId} of scene {session.SceneEntry} reported at {session.Position.X:F0},{session.Position.Z:F0}");
+            return Task.CompletedTask;
+        }
+        return ProgressAsync(session, TArea, t => t.Length >= 3 && t[1] == session.SceneEntry && t[2] == req.AreaId ? 1 : 0);
+    }
 
-    /// <summary>31214 TASK_TRIGGER_EVENT: target 103046 [interactId, n]; the request's taskId field carries the interaction id.</summary>
+    /// <summary>
+    /// 31214 TASK_TRIGGER_EVENT: target 103046 [interactId, n]; the request's taskId field carries the interaction id. The
+    /// interaction is an NPCInteractConfig row of the NPCs whose _iInteractID lists it (40004201 is NPC 400042's): when the
+    /// map places such an NPC, the player must stand within <see cref="InteractReach"/> m of one.
+    /// </summary>
     public async Task OnClientInteractAsync(GameSession session, TriggerTaskEventReq req)
     {
         using var gate = await LockTasksAsync(session);
         if (BeforeProgress is { } before) await before(session);
-        // C3 reports the final required value, never a delta. Active task + configured map are the available
-        // context (inferred); this packet cannot prove that the local interaction animation actually ran.
-        bool matches = req.GoalCount > 0 && session.Tasks?.Infos.Values.Any(i => i.Status == Running
+        // C3 reports the final required value, never a delta. Active task + configured map + the NPC nearby are the
+        // available context (inferred); this packet cannot prove that the local interaction animation actually ran.
+        bool near = InteractNear(session, req.TaskId);
+        if (!near) _scene.Cheats.Refused(session, CheatMonitor.QuestInteract,
+            $"interaction {req.TaskId} in scene {session.SceneEntry} reported at {session.Position.X:F0},{session.Position.Z:F0}");
+        bool matches = near && req.GoalCount > 0 && session.Tasks?.Infos.Values.Any(i => i.Status == Running
             && Defs().TryGetValue(i.TaskId, out var d) && ContextMapMatches(session, d)
             && d.Targets.Any(t => t is [TClientInteract, var id, var required] && id == req.TaskId && required == req.GoalCount)) == true;
         if (matches) await ProgressCoreAsync(session, TClientInteract,
@@ -221,6 +244,15 @@ public sealed partial class TaskService
             d => ContextMapMatches(session, d));
         await session.SendGameAsync(TriggerTaskEvent, new TriggerTaskEventResp
         { Result = matches ? 0 : ErrorCodes.TaskRequirements, TaskId = req.TaskId, GoalCount = req.GoalCount });
+    }
+
+    /// <summary>(inferred) As a dialog's 12 m (TaskActions.NearPoint), plus the interaction's own approach.</summary>
+    private const float InteractReach = 15;
+
+    private bool InteractNear(GameSession session, long interactId)
+    {
+        long npc = interactId / 100;
+        return Data.Config.NPCConfig.Get(_data, npc) is not { } row || !row.InteractId.Contains(interactId) || _scene.NearNpc(session, npc, InteractReach);
     }
 
     /// <summary>
@@ -290,6 +322,7 @@ public sealed partial class TaskService
             Accept(session, id);
             changed = true;
         }
+        if (AcceptFactionTasks(session) > 0) changed = true; // a new game day (TaskService.FactionQuest.cs)
         if (changed) await FlushAsync(session);
     }
 
@@ -525,7 +558,7 @@ public sealed partial class TaskService
                     moved = true;
                     if (def.Type == ChickenTaskType) chickenFinished.Add(def.Id);
                 }
-                if (def.Deliver == ReceiveAuto)
+                if (def.Deliver == ReceiveAuto || DeliversItself(def))
                 {
                     int result = await DeliverCoreAsync(session, context, def.Id);
                     if (result == 0) moved = true;
@@ -597,7 +630,11 @@ public sealed partial class TaskService
             int? playBook = session.Synced.GetValueOrDefault(SeasonService.SeasonSync) is DBSeasonInfo { Current: { } current }
                 ? (int)current.PlayBookId : null;
             var plan = _awards.ResolveTask(session, def.Award, playBook);
-            var runtime = new TaskRuntimeState { CompletedGuides = session.TaskRuntime.CompletedGuides.ToHashSet(), InCutScene = session.InCutScene || cutScene };
+            var runtime = new TaskRuntimeState
+            {
+                CompletedGuides = [.. session.TaskRuntime.CompletedGuides], InCutScene = session.InCutScene || cutScene,
+                FactionDay = session.TaskRuntime.FactionDay, FactionPoints = session.TaskRuntime.FactionPoints,
+            };
             string awardSource = $"task/{session.Role!.Id}/{id}/{next.CompleteTaskNum[id]}/" +
                 $"{session.Daily?.DailyEpoch ?? 0}/{session.Daily?.WeeklyEpoch ?? 0}";
             if (!await _character.ApplyAwardAsync(session, plan, def.Exp, costs, next.ToByteArray(),
@@ -656,7 +693,7 @@ public sealed partial class TaskService
             }
         }
         return accepted + AcceptGrowthTitle(session) + AcceptGrowthClass(session) + AcceptActivityTasks(session)
-            + AcceptChickenTasks(session) + AcceptRootTasks(session) + AcceptMiscTasks(session);
+            + AcceptChickenTasks(session) + AcceptTavernTasks(session) + AcceptRootTasks(session) + AcceptMiscTasks(session);
     }
 
     private bool Ready(GameSession session, TaskDef def) =>
@@ -704,7 +741,7 @@ public sealed partial class TaskService
             {
                 var t = def.Targets[i];
                 if (!Supported(t)) { info.CompleteNum[i] = 0; continue; }
-                long value = PassiveValue(session, t);
+                long value = TavernStay(session, def, t) is var stay and >= 0 ? stay : PassiveValue(session, t);
                 if (value < 0) continue;
                 info.CompleteNum[i] = Math.Min(Required(session, t), value);
             }
@@ -746,7 +783,7 @@ public sealed partial class TaskService
         var children = new Dictionary<long, List<long>>();
         foreach (var def in defs.Values)
             foreach (var pre in def.Pre)
-                (children.TryGetValue(pre, out var list) ? list : children[pre] = new()).Add(def.Id);
+                (children.TryGetValue(pre, out var list) ? list : children[pre] = []).Add(def.Id);
         _children = children;
         _defs = defs;
         _log.LogInformation("Tasks: {Count} TaskConfig rows", defs.Count);
@@ -755,13 +792,12 @@ public sealed partial class TaskService
 
     private static long[] Longs(JsonElement row, string field) =>
         row.TryGetProperty(field, out var a) && a.ValueKind == JsonValueKind.Array
-            ? a.EnumerateArray().Select(e => (long)(GameData.Number(e) ?? 0)).ToArray() : [];
+            ? [.. a.EnumerateArray().Select(e => (long)(GameData.Number(e) ?? 0))] : [];
 
     private static long First(JsonElement row, string field) => Longs(row, field) is [var first, ..] ? first : 0;
 
     private static long[][] Targets(JsonElement row) =>
         row.TryGetProperty("_kProgressTarget", out var a) && a.ValueKind == JsonValueKind.Array
-            ? a.EnumerateArray().Where(t => t.ValueKind == JsonValueKind.Array && t.GetArrayLength() > 0)
-                .Select(t => t.EnumerateArray().Select(e => (long)(GameData.Number(e) ?? 0)).ToArray()).ToArray()
+            ? [.. a.EnumerateArray().Where(t => t.ValueKind == JsonValueKind.Array && t.GetArrayLength() > 0).Select(t => t.EnumerateArray().Select(e => (long)(GameData.Number(e) ?? 0)).ToArray())]
             : [];
 }

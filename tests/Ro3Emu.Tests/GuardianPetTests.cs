@@ -534,7 +534,7 @@ public sealed class GuardianPetTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task OnlyAGuardiansControlBuffStopsAMonster(bool guardian)
+    public async Task AnyControlBuffStopsAMonster(bool guardian)
     {
         await using var f = new Fixture();
         await f.Start();
@@ -546,8 +546,8 @@ public sealed class GuardianPetTests
             if (guardian) await buffs.AddGuardianAsync(monster, Petrify, 5000, f.Session.Role!.Id);
             else await buffs.AddSupportAsync(monster, Petrify, 5000, f.Session.Role!.Id);
             Assert.True(buffs.UnitHasGroup(monster, BuffService.PetrifyGroup));
-            Assert.Equal(guardian, buffs.UnitForbidden(monster, ForbiddenState.Walk));
-            Assert.Equal(guardian ? 1UL << 11 : 0, buffs.UnitStatus(monster)); // SpecialStatusConfig 12, Petrify
+            Assert.True(buffs.UnitForbidden(monster, ForbiddenState.Walk));
+            Assert.Equal(1UL << 11, buffs.UnitStatus(monster)); // SpecialStatusConfig 12, Petrify
         });
     }
 
@@ -608,9 +608,9 @@ public sealed class GuardianPetTests
     }
 
     [Theory]
-    [InlineData(false, 3500)]
+    [InlineData(false, 2500)]
     [InlineData(true, 2500)]
-    public async Task OnlyAGuardiansCastSpeedShortensTheVariableChant(bool guardian, int expectedMs)
+    public async Task CastSpeedShortensTheVariableChantWhereverItComesFrom(bool guardian, int expectedMs)
     {
         await using var f = new Fixture();
         await f.Start();

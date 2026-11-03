@@ -107,6 +107,12 @@ public sealed partial class TaskService
     //   guild GVE this client runs is Ilmata (GuildChallengeService; the client's GuildGVE/GVEWhaleRally, its result panel
     //   is UI_Sys_GVE_VictoryNewPanelCtrl). The classic GVE (GVEconfig, sc_GVE_MonsterDragon) has no server here. One per
     //   settled Ilmata stage attempt the member was present for, won or lost (participation, inferred).
+    // - 210006 [n] "Complete a Training Ground Dummy Challenge" (side quest 10200120; ProgressConfig 210006 has only the
+    //   generic "Attempt requirement Not Reached", LC_InteractCondition has no formatter for it): one per committed result
+    //   of a full challenge on 2100011, the moment the client's rule text says the countdown ends and the DMG/DPS are
+    //   calculated (TrainingService.ChallengeSettled). Practice, a reset or leaving early settles nothing; no DPS threshold,
+    //   since the target has none (inferred).
+    private const int TDummyChallenge = 210006;
     private const int TStunts = 302005, TPetRoom = 306004, TTenBossWin = 106602, TTreasureDig = 106802,
         TCoffinOrSurvivor = 210012, TDragonCoffin = 210009, TLeagueJoin = 106603, TGveJoin = 103014;
 
@@ -155,12 +161,12 @@ public sealed partial class TaskService
     public Func<GameSession, long>? BattleMeritPoints { get; set; }
 
     // 106010 BarroomToDayActTime [n] "Today's active time in the Tavern" is the Tavern quest's target (TaskConfig 2000,
-    // type 9, [106010,1200]); the guild To-Do tasks reuse it as a stand-in, [106010,5] (TaskService.GuildEvents). Only
-    // those are supported: this server has no Tavern, so the Tavern quest stays without a producer.
+    // type 9, [106010,1200]; today's seconds in a room, TaskService.TavernTasks); the guild To-Do tasks reuse it as a
+    // stand-in, [106010,5], an event counter (TaskService.GuildEvents). Other quests with it stay without a producer.
     private const int TBarroomActTime = 106010;
 
-    private readonly ConditionalWeakTable<MonsterUnit, HashSet<long>> _participants = new();
-    private readonly HashSet<GameSession> _refreshQueued = new();
+    private readonly ConditionalWeakTable<MonsterUnit, HashSet<long>> _participants = [];
+    private readonly HashSet<GameSession> _refreshQueued = [];
 
     private void QueueRefresh(GameSession session)
     {
@@ -181,7 +187,8 @@ public sealed partial class TaskService
         [TPlot or TBaseLevel or TSkillPoints or TStatPoints or TResonance or TTotalRefine or TRefineSlots
             or TRefineCount or TMvp or TMvpOnce or TCargo or TAfkSeconds or TTimedBattle or TCaravan
             or TTalentLevels or TPetsDeployed or TTowerFloor or TGuildHunt or TDraculaWedding or TPetSupport
-            or TPetRoom or TTreasureDig or TCoffinOrSurvivor or TDragonCoffin or TGveJoin or TFriends or TEchoLevelSum
+            or TPetRoom or TTreasureDig or TDummyChallenge or TCoffinOrSurvivor or TDragonCoffin or TGveJoin or TFriends
+            or TEchoLevelSum
             or TEchoUpgrade or TTowerJoin or TTowerWin or TTowerFloorReached or TLike or TLiveness or TCampfire
             or TGvgJoin or TGvgWin or TLogin or TBarroomActTime or TBattleMerit, var n] => n,
         [TTenBossWin, var n, _, ..] => n,
@@ -253,7 +260,8 @@ public sealed partial class TaskService
 
     /// <summary>Every target of the quest has a supported reader and a positive R (a quest without one never ends).</summary>
     internal bool TargetsSupported(long taskId) => Defs().TryGetValue(taskId, out var def) && def.Targets.Length > 0
-        && def.Targets.All(t => Supported(t) && Required(null, t) > 0 && (t[0] != TBarroomActTime || GuildEventTask(def.Id)));
+        && def.Targets.All(t => Supported(t) && Required(null, t) > 0
+            && (t[0] != TBarroomActTime || GuildEventTask(def.Id) || def.Type == BarRoomTaskType));
 
     private bool ItemExists(long id) => id > 0 && id <= int.MaxValue && _data.Row("ItemConfig", id) != null;
 
@@ -401,12 +409,12 @@ public sealed partial class TaskService
         if (settlement.TaskParticipantIds == null)
         {
             var credited = _participants.TryGetValue(monster, out var ids) ? ids : [];
-            settlement.TaskParticipantIds = _sessions.All()
+            settlement.TaskParticipantIds = [.. _sessions.All()
                 .Where(s => s.Role != null && s.Tasks != null && s.WorldScene == monster.WorldScene &&
                     (ReferenceEquals(s, killer) || credited.Contains(s.Role.Id)))
-                .Select(s => s.Role!.Id).Distinct().Order().ToArray();
+                .Select(s => s.Role!.Id).Distinct().Order()];
         }
-        return settlement.TaskParticipantIds.Select(id => ReservationKey.Role(id)).ToArray();
+        return [.. settlement.TaskParticipantIds.Select(id => ReservationKey.Role(id))];
     }
 
     /// <summary>Freeze the exact running targets under all participant role reservations before the kill writer
@@ -436,8 +444,8 @@ public sealed partial class TaskService
                     var target = def.Targets[index];
                     bool matches = target[0] switch
                     {
-                        TKill => ReferenceEquals(session, killer) && target.Length >= 3 && target[1..^1].Contains(monster.Template.NpcId),
-                        TKillInvolved => target.Length >= 3 && target[1..^1].Contains(monster.Template.NpcId),
+                        TKill => ReferenceEquals(session, killer) && target.Length >= 3 && target.AsSpan(1, target.Length - 2).Contains(monster.Template.NpcId),
+                        TKillInvolved => target.Length >= 3 && target.AsSpan(1, target.Length - 2).Contains(monster.Template.NpcId),
                         TMapKill => target.Length == 3 && target[1] == monster.SceneEntry,
                         TKillOnMap => ReferenceEquals(session, killer) && target.Length == 3 && target[2] == monster.SceneEntry,
                         _ => false
@@ -472,7 +480,7 @@ public sealed partial class TaskService
                 {
                     byte[]? beforeFollowup = _roles.ReadTaskFollowup(builder, x.Role);
                     var pending = beforeFollowup is { Length: > 0 }
-                        ? JsonSerializer.Deserialize<HashSet<string>>(beforeFollowup) ?? [] : new HashSet<string>();
+                        ? JsonSerializer.Deserialize<HashSet<string>>(beforeFollowup) ?? [] : [];
                     pending.Add("kill/" + settlement.SourceKey);
                     return new KillTaskProgress(x.Role, x.BeforeTasks, x.AfterTasks, beforeFollowup,
                         JsonSerializer.SerializeToUtf8Bytes(pending));
@@ -492,7 +500,7 @@ public sealed partial class TaskService
 
     private async Task OnKillAsync(GameSession killer, MonsterUnit monster)
     {
-        var participants = _participants.TryGetValue(monster, out var credited) ? credited.ToHashSet() : new HashSet<long>();
+        var participants = _participants.TryGetValue(monster, out var credited) ? credited.ToHashSet() : [];
         if (killer.Role != null) participants.Add(killer.Role.Id);
         _participants.Remove(monster);
         if (monster.RewardSettlement?.TaskObligationsStaged == true)
@@ -505,8 +513,8 @@ public sealed partial class TaskService
         await RoleFanout.EachAsync(_sessions.All().Where(s => s.Role != null && s.WorldScene == monster.WorldScene && participants.Contains(s.Role.Id)),
             s => ProgressAsync(s, null, t => t[0] switch
             {
-                TKill when s == killer && t.Length >= 3 && t[1..^1].Contains(monster.Template.NpcId) => 1,
-                TKillInvolved when t.Length >= 3 && t[1..^1].Contains(monster.Template.NpcId) => 1,
+                TKill when s == killer && t.Length >= 3 && t.AsSpan(1, t.Length - 2).Contains(monster.Template.NpcId) => 1,
+                TKillInvolved when t.Length >= 3 && t.AsSpan(1, t.Length - 2).Contains(monster.Template.NpcId) => 1,
                 TMapKill when t.Length == 3 && t[1] == monster.SceneEntry => 1,
                 TKillOnMap when s == killer && t.Length == 3 && t[2] == monster.SceneEntry => 1,
                 _ => 0,
@@ -597,6 +605,10 @@ public sealed partial class TaskService
 /// <summary>Extra authoritative quest source state; stored alongside DBTaskInfo. No new client dataset.</summary>
 public sealed class TaskRuntimeState
 {
-    public HashSet<long> CompletedGuides { get; set; } = new();
+    public HashSet<long> CompletedGuides { get; set; } = [];
     public bool InCutScene { get; set; }
+    /// <summary>The game day (DailyActivityService epoch) of <see cref="FactionPoints"/> (TaskService.FactionQuest.cs).</summary>
+    public long FactionDay { get; set; }
+    /// <summary>The Faction Quest points counted that day, the exceed past 1101000's 1000 included.</summary>
+    public long FactionPoints { get; set; }
 }

@@ -80,6 +80,9 @@ public sealed partial class LauncherController : ILauncherController
             case "uninstall":
                 await UninstallAsync();
                 break;
+            case "panel":
+                if (PanelUrl() is { } panel) MainWindow.OpenExternal(panel);
+                break;
         }
     }
 
@@ -111,7 +114,11 @@ public sealed partial class LauncherController : ILauncherController
         links = _config.Links.Where(l => l.Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
             || l.Url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)).Select(l => new { label = l.Label, url = l.Url, icon = l.Icon }),
         canUninstall = CanUninstall(),
+        panel = PanelUrl() is { } url ? new { state = Ro3Emu.Setup.PanelLink.Open, url } : null,
     });
+
+    /// <summary>The title bar's Web panel entry: only the operator's "panelUrl" (an operator's launcher looks for no panel itself).</summary>
+    string? PanelUrl() => Ro3Emu.Setup.PanelLink.Configured(_config.PanelUrl);
 
     void PostState(string phase, string? message = null, long? downloadBytes = null)
     {
@@ -142,8 +149,11 @@ public sealed partial class LauncherController : ILauncherController
         catch (Exception e) when (e is PatcherException or HttpRequestException or TaskCanceledException or IOException or JsonException)
         {
             _installed = new Updater(_layout, _repo).LoadState();
+            // The patcher's own words say why (a repository that is not https, a missing channel); a network error has none.
+            string? reason = e is PatcherException ? e.Message : null;
             // Offline but installed: the game can still start (the update server and the game server are separate).
-            PostState(_installed is not null ? "ready" : "offline", _installed is not null ? "Can't reach the update server; playing the installed version." : null);
+            if (_installed is not null) PostState("ready", (reason ?? "Can't reach the update server.") + " Playing the installed version.");
+            else PostState("offline", reason);
         }
         PostSettings();
     }

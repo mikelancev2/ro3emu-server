@@ -26,6 +26,19 @@ public sealed partial class AccountStore : IDisposable
     private readonly Lazy<DbReadPool> _readers;
     private readonly Game.GameLoop? _loop;
     private readonly ILogger<AccountStore>? _log;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _standingEconomyIssues = new();
+
+    /// <summary>Stored rows the economy decoder could not read, each logged once: operations go on without them, so this is
+    /// what tells the operator (EconomyEnvelopePlan).</summary>
+    internal int StandingEconomyIssues => _standingEconomyIssues.Count;
+
+    internal void ReportStandingEconomyIssue(EconomyIssue issue)
+    {
+        if (_standingEconomyIssues.TryAdd(issue.Key, 0) && _log != null) LogStandingEconomyIssue(_log, issue.Key, issue.Kind, issue.Detail);
+    }
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Economy decoder cannot read the stored row {Key} ({Kind}): {Detail}. Its value is left out of economy checks until it is repaired.")]
+    private static partial void LogStandingEconomyIssue(ILogger logger, string key, EconomyIssueKind kind, string detail);
     private readonly object _runtimeGate = new();
     private bool _disposed;
     private int _failNextEconomyAcknowledgementForTest;
@@ -45,7 +58,7 @@ public sealed partial class AccountStore : IDisposable
         _log = log;
         // A half-done restore may have moved the live file away; opening now would create an empty realm (C/D 19).
         DatabaseRestore.ThrowIfUnfinished(options.Value.DataDir);
-        Directory.CreateDirectory(options.Value.DataDir);
+        PrivateFiles.Directory(options.Value.DataDir);
         _databasePath = Path.Combine(options.Value.DataDir, "ro3emu.db");
         _escrowCatalog = new Lazy<EconomyCatalog>(() =>
         {
@@ -67,6 +80,8 @@ public sealed partial class AccountStore : IDisposable
             wal.CommandText = "PRAGMA journal_mode=WAL;";
             wal.ExecuteNonQuery();
         }
+        // SQLite gives the WAL and shared-memory files the database file's mode, so they follow it.
+        PrivateFiles.Files(_databasePath, _databasePath + "-wal", _databasePath + "-shm");
         using var cmd = db.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS account (
@@ -98,7 +113,7 @@ public sealed partial class AccountStore : IDisposable
             """;
         cmd.ExecuteNonQuery();
         _writer = new(() => new DbWriter(_connectionString, AccessMetrics, _metrics, _log)
-        { RoleWritesCommitted = Snapshots.Committed, Caches = Caches });
+        { RoleWritesCommitted = Snapshots.Committed, Caches = Caches, StandingIssue = ReportStandingEconomyIssue });
         _readers = new(() => new DbReadPool(_databasePath, AccessMetrics, _metrics, _log));
         foreach (var plan in DatabaseSchema.Plans()) WriteSync<int>(plan);
     }
@@ -150,8 +165,9 @@ public sealed partial class AccountStore : IDisposable
         catch { db.Dispose(); throw; }
     }
 
-    /// <summary>Banned: the credential matched (or registered the name) but the account has an active ban.</summary>
-    public enum LoginResult { Ok, Registered, BadPassword, Banned }
+    /// <summary>Banned: the credential matched (or registered the name) but the account has an active ban. Unknown: no
+    /// account has the name and the sign-in was told not to register it (ServerOptions.RefuseUnknownAccounts).</summary>
+    public enum LoginResult { Ok, Registered, BadPassword, Banned, Unknown }
 
     private bool OnLoop => _loop?.IsOnLoop == true || _metrics != null && ReferenceEquals(ServerMetrics.LoopOwner, _metrics);
     private DbWriter Writer { get { lock (_runtimeGate) { ObjectDisposedException.ThrowIf(_disposed, this); return _writer.Value; } } }
@@ -222,6 +238,8 @@ public sealed partial class AccountStore : IDisposable
         object?[] result;
         try { result = await Writer.ExecuteAsync<object?[]>(plan); }
         catch (EconomyOperationConflictException) { throw; }
+        // Not admitted: nothing was written, so this is a definite failure, never an unknown outcome to resolve.
+        catch (DbQueueFullException) { throw; }
         catch (Exception original)
         {
             object?[]? resolved;
@@ -266,6 +284,8 @@ public sealed partial class AccountStore : IDisposable
         object?[] result;
         try { result = await Writer.ExecuteAsync<object?[]>(plan); }
         catch (EconomyOperationConflictException) { throw; }
+        // Not admitted: nothing was written, so this is a definite failure, never an unknown outcome to resolve.
+        catch (DbQueueFullException) { throw; }
         catch (Exception original)
         {
             object?[]? resolved;
@@ -417,14 +437,13 @@ public sealed partial class AccountStore : IDisposable
         FlushStagedFor(plan);
         bool cached = false;
         if (plan.RolePins.Count != 0)
-            plan.Expect(plan.RolePins.Distinct().Select(role =>
+            plan.Expect([.. plan.RolePins.Distinct().Select(role =>
             {
                 if (!fresh && OwnerVector(role) is { } vector) { cached = true; return vector; }
                 return ReadVector(role, overtaken: fresh);
-            }).ToArray());
+            })]);
         if (plan.EntityWrites.Count != 0)
-            plan.ExpectEntities(plan.EntityWrites.Distinct()
-                .Select(key => ReadSync<OwnerRevisionValue>(new OwnerRevisionReadPlan(key))).ToArray());
+            plan.ExpectEntities([.. plan.EntityWrites.Distinct().Select(key => ReadSync<OwnerRevisionValue>(new OwnerRevisionReadPlan(key)))]);
         return cached;
     }
     private DbPlan Prepare(DbPlan plan)
@@ -527,20 +546,22 @@ public sealed partial class AccountStore : IDisposable
     /// Login or first-time registration. <see cref="SignIn.Account"/> is the account's stored name, which can differ
     /// from <paramref name="name"/> in letter case; tokens and sessions must carry it, never the typed spelling. The ban
     /// is checked only once the password matched, so a wrong password answers the same whether or not the account is
-    /// banned; a name that has no account but a ban row is refused before it is registered.
+    /// banned; a name that has no account but a ban row is refused before it is registered. With
+    /// <paramref name="register"/> false a name that has no account is answered Unknown and nothing is written.
     /// </summary>
-    public async Task<SignIn> SignInAsync(string name, string password)
+    public async Task<SignIn> SignInAsync(string name, string password, bool register = true)
     {
-        var signIn = await CheckOrRegisterAsync(name, password).ConfigureAwait(false);
-        if (signIn.Result is LoginResult.BadPassword or LoginResult.Banned) return signIn;
+        var signIn = await CheckOrRegisterAsync(name, password, register).ConfigureAwait(false);
+        if (signIn.Result is LoginResult.BadPassword or LoginResult.Banned or LoginResult.Unknown) return signIn;
         return await UnlessBannedAsync(signIn.Account, "sign-in").ConfigureAwait(false) == null
             ? signIn with { Result = LoginResult.Banned } : signIn;
     }
 
-    private async Task<SignIn> CheckOrRegisterAsync(string name, string password)
+    private async Task<SignIn> CheckOrRegisterAsync(string name, string password, bool register)
     {
         var existing = await ReadAsync<AccountCredentials?>(new AccountCredentialsRead(name)).ConfigureAwait(false);
         if (existing != null) return await Check(existing).ConfigureAwait(false);
+        if (!register) return new(LoginResult.Unknown, name);
         switch (await TryRegisterAsync(name, password).ConfigureAwait(false))
         {
             case Registration.Banned: return new(LoginResult.Banned, name);

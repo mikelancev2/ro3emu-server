@@ -30,7 +30,7 @@ public sealed partial class CharacterService
 
     /// <summary>Loot: several items / currencies at once, one bag sync, marked new (no float: the drop notify shows them).</summary>
     public Task GrantAsync(GameSession session, IReadOnlyList<(int Entry, int Count)> items, Func<bool>? stillOwner = null) =>
-        GrantBoundAsync(session, items.Select(i => (i.Entry, i.Count, Bind: 0)).ToList(), stillOwner);
+        GrantBoundAsync(session, [.. items.Select(i => (i.Entry, i.Count, Bind: 0))], stillOwner);
 
     /// <summary>Quest grants preserve AwardConfig's bind flag; bound and unbound stacks remain separate.</summary>
     public async Task GrantBoundAsync(GameSession session, IReadOnlyList<(int Entry, int Count, int Bind)> items,
@@ -116,7 +116,7 @@ public sealed partial class CharacterService
         context.AssertRole(session.Role!.Id);
         context.BindPresentation(session);
         var attachment = session.Attachment;
-        if (taskBaseExp < 0) throw new ArgumentOutOfRangeException(nameof(taskBaseExp));
+        ArgumentOutOfRangeException.ThrowIfNegative(taskBaseExp);
         // PBManifestType.ManifestTypeRunRing (18) needs the slots LC_DAL_Reward uses to stop the wheel.
         if (manifestType is < 1 or > 19 or 15 || manifestType == TaskService.ManifestTypeRunRing && rewardIndexes is not { Count: > 0 })
             throw new ArgumentOutOfRangeException(nameof(manifestType));
@@ -206,7 +206,7 @@ public sealed partial class CharacterService
                     {
                         Entry = grant.Entry, Stack = stack, Pack = pack,
                         Sort = items.Where(i => i.Grid == 0 && i.Pack == pack).Select(i => i.Sort).DefaultIfEmpty(0).Max() + 1,
-                        BindType = grant.BindType, BindExpire = grant.ExpireTimeStamp,
+                        BindType = grant.BindType, BindExpire = grant.ExpireTimeStamp != 0 ? grant.ExpireTimeStamp : AcquireExpiry(grant.Entry),
                         Attrs = TotemAttrFactory?.Invoke(grant.Entry) ?? EmblemAttrFactory?.Invoke(grant.Entry) ?? RollAttrs(grant.Entry)
                     };
                     items.Add(item);
@@ -233,6 +233,7 @@ public sealed partial class CharacterService
         // Other ApplyAward callers have no quest delivery boundary and retain their standalone behavior.
         var decomposed = deliveredTaskState == null && ownedAward?.CommandKind != "cd13e/grant" ? new ItemAutoDecomposeTipsNtf()
             : StageAutoDecomposeAward(session, items, staged, received, beforeGrants, gained);
+        jobExp = checked(jobExp + JobExpFromBase(baseExp));
         AddVirtualReward(notification, BaseExpItem, baseExp);
         AddVirtualReward(notification, JobExpItem, jobExp);
         int oldLevel = staged.Level, oldJob = staged.JobLevel;
@@ -240,7 +241,7 @@ public sealed partial class CharacterService
         // TaskService can hold unsaved in-memory objective progress. Compare that snapshot above, then
         // use the persisted blob as the SQLite CAS baseline for this single award transaction.
         byte[]? persistedTasks = expectedTasks == null ? null : roles.LoadTasks(session.Role.Id);
-        var cardSight = StageFirstCardSight?.Invoke(session, gained.Select(g => g.Entry).ToList(), 0);
+        var cardSight = StageFirstCardSight?.Invoke(session, [.. gained.Select(g => g.Entry)], 0);
         void PublishAward()
         {
             session.Progress = staged;
@@ -355,6 +356,7 @@ public sealed partial class CharacterService
         if (decomposed.DecomposeItemInfo.Count > 0)
             await session.SendGameAsync(EquipmentService.ItemAutoDecomposeNotice, decomposed);
         foreach (var (entry, count) in gained) foreach (var handler in ItemGained) handler(session, entry, count);
+        foreach (var handler in ItemsAwarded) handler(session, gained);
         foreach (var handler in StateChanged) handler(session);
         return true;
     }
@@ -469,7 +471,8 @@ public sealed partial class CharacterService
             var item = new InvItem
             {
                 Entry = entry, Stack = stack, Pack = pack, Sort = NextSort(session, pack),
-                Attrs = TotemAttrFactory?.Invoke(entry) ?? EmblemAttrFactory?.Invoke(entry) ?? RollAttrs(entry), BindType = bind
+                Attrs = TotemAttrFactory?.Invoke(entry) ?? EmblemAttrFactory?.Invoke(entry) ?? RollAttrs(entry), BindType = bind,
+                BindExpire = AcquireExpiry(entry)
             };
             if (persist) itemStore.Insert(session.Role!.Id, item);
             session.Items.Add(item);
