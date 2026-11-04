@@ -22,6 +22,7 @@ public readonly partial record struct SkillConfig(JsonElement Row)
     [ConfigField("_iDistanceMin")] public partial long DistanceMin { get; }
     [ConfigField("_iDistanceType")] public partial long DistanceType { get; }
     [ConfigField("_iDmgType")] public partial long DmgType { get; }
+    [ConfigField("_iAreaHeightRange")] public partial long AreaHeightRange { get; }
     [ConfigField("_iEleType")] public partial long EleType { get; }
     [ConfigField("_iExtraType")] public partial long ExtraType { get; }
     [ConfigField("_iHeightRange")] public partial long HeightRange { get; }
@@ -55,6 +56,8 @@ public readonly partial record struct SkillConfig(JsonElement Row)
     [ConfigField("_iPubCDGroup")] public partial long[] PubCDGroup { get; }
     [ConfigField("_iQueue")] public partial long Queue { get; }
     [ConfigField("_iRangeType")] public partial long RangeType { get; }
+    /// <summary>The tags its panel shows (SkillTagConfig: 100 Normal Attack, 101 AoE, 102 ST ...).</summary>
+    [ConfigField("_kSkilltag")] public partial long[] Skilltag { get; }
     [ConfigField("_iSkillCondition", Optional = true)] public partial long SkillCondition { get; }
     [ConfigField("_iRelease")] public partial long Release { get; }
     [ConfigField("_iScriptShow")] public partial long ScriptShow { get; }
@@ -83,6 +86,7 @@ public readonly partial record struct SkillConfig(JsonElement Row)
     [ConfigField("_kRange")] public partial long[] Range { get; }
     [ConfigField("_kScriptLogic")] public partial string ScriptLogic { get; }
     [ConfigField("_kShowDmg")] public partial long[] ShowDmg { get; }
+    [ConfigField("_kSkillHighParam", Optional = true)] public partial JsonElement? SkillHighParam { get; }
     [ConfigField("_kSkillCategory")] public partial long[] SkillCategory { get; }
     [ConfigField("_kSpSkillParam")] public partial long[] SpSkillParam { get; }
 
@@ -109,6 +113,8 @@ public readonly partial record struct SkillConfig(JsonElement Row)
 
     /// <summary>This row dealing exactly this damage to each target (CombatService.MonsterHitDamage's fixed hit: no ratio,
     /// defense, element, crit or damage attribute), everything else kept.</summary>
+    public bool IsFixedHit => Row.TryGetProperty("_ro3GuardianFixedHit", out _);
+
     public JsonElement AsFixedHit(long damage)
     {
         var node = System.Text.Json.Nodes.JsonNode.Parse(Row.GetRawText())!.AsObject();
@@ -130,6 +136,9 @@ public readonly partial record struct SkillConfig(JsonElement Row)
     /// <summary>Set on one hit of a staged cast that moves nobody (Fearless Charge's knock-up, Earthshaker's hits before its last).
     /// Not a client field: the rule is the cast's, and a hit's row is all both the monster and the player path read.</summary>
     public const string StillHitField = "stillHit";
+
+    /// <summary>The list fields SkillParameterRules changes by a tuple's index.</summary>
+    public const string LogicDataField = "_kLogicData", CostField = "_kCost", FlatDamageField = "_kDamageParam2";
 
     /// <summary>A status this hit lands on a target the cast has not yet given one: Tetra Vortex's "guaranteed to inflict at least 1". Not a client field.</summary>
     public const string GuaranteedStatusField = "guaranteedStatus";

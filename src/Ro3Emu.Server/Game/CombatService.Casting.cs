@@ -35,6 +35,8 @@ public sealed class ActiveSkillCast
     internal Dictionary<long, long>? GuardianDamage { get; init; }
     internal SemaphoreSlim? GuardianGate { get; init; }
     internal HashSet<int>? GuardianOnce { get; init; }
+    /// <summary>The players this cast struck, for what follows it (CardEffects).</summary>
+    internal GameSession[] PlayersStruck { get; set; } = [];
     public long SourceId => Operator?.Uid ?? OwnerId;
 }
 
@@ -365,6 +367,8 @@ public sealed partial class CombatService
     private static float Distance(Vec3 a, Vec3 b) => MonsterService.Distance(a.X, a.Z, b.X, b.Z);
     private static float Range(JsonElement row) => Math.Max(0, GameData.Int(row, "_iDistanceMax") / 100f);
     private static string Script(JsonElement row) => row.TryGetProperty("_kScriptLogic", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+    // AcolyteBD4 is Resurrection's mode row under Revive [Buff Effect] (SkillConfig 1411211-1411214), with the same text.
+    private static bool IsResurrection(JsonElement row) => Script(row) is "Resurrection" or "AcolyteBD4";
     private static double[] Numbers(JsonElement row, string key) => row.TryGetProperty(key, out var list) && list.ValueKind == JsonValueKind.Array
         ? [.. list.EnumerateArray().Select(v => GameData.Number(v) ?? 0)] : [];
     private static IEnumerable<JsonElement> Tuples(JsonElement row, string key) => row.TryGetProperty(key, out var list) && list.ValueKind == JsonValueKind.Array
@@ -424,8 +428,17 @@ public sealed partial class CombatService
     private int ValidateTarget(GameSession s, JsonElement row, CastSkillReq req, Vec3 origin, float slack = 0, float askedRange = 0)
     {
         int release = (int)GameData.Int(row, "_iRelease");
+        if (AimsFromSeat?.Invoke(s, (int)new SkillConfig(row).Id) == true)
+        {
+            // The crosshair's ray (LC_TPSComponent._raycast) names its unit in targetsId; a shot past everything hits nothing.
+            // The row's 3 m height range is not asked: the deck stands up to 20 m above the patrols it fires at.
+            if (req.TargetId == 0 && req.TargetsId.Count > 0) req.TargetId = req.TargetsId[0];
+            if (FindMonster(s.WorldScene, req.TargetId) is not { } aimed || !CanHitMonster(s, aimed)) req.TargetId = 0;
+            req.TargetPos ??= origin.Clone();
+            return 0;
+        }
         var monster = FindMonster(s.WorldScene, req.TargetId);
-        bool revive = Script(row) == "Resurrection";
+        bool revive = IsResurrection(row);
         var player = req.TargetId == s.Role!.Id ? s : FindPlayer(s, req.TargetId, revive);
         var enemyPlayer = EventTarget(s, req.TargetId);
         Vec3 targetPosition;
@@ -570,8 +583,29 @@ public sealed partial class CombatService
         if (notice.Infos.Count > 0) await s.SendGameAsync(SkillCdUpdate, notice);
     }
 
+    /// <summary>Takes this long off a skill group's running cooldowns (Crescent Wheel on Axe Tornado), each under the mode it was shown; past its end it ends.</summary>
+    internal static async Task CutCooldownAsync(GameSession s, int group, long ms)
+    {
+        long now = Now;
+        var notice = new SkillCdNotify { Uuid = s.Role!.Id };
+        foreach (var (key, end) in s.SkillModeCds.Where(c => c.Key.Group == group && c.Value > now).ToArray())
+        {
+            long left = Math.Max(now, end - ms);
+            if (left > now) s.SkillModeCds[key] = left; else s.SkillModeCds.Remove(key);
+            notice.Infos.Add(new SkillCdInfo { SkillId = group, SkillMode = key.Mode, CdStartTimestampMs = now, CdEndTimestampMs = left });
+        }
+        if (s.SkillCds.TryGetValue(group, out long plain) && plain > now)
+        {
+            long left = Math.Max(now, plain - ms);
+            if (left > now) s.SkillCds[group] = left; else s.SkillCds.Remove(group);
+            if (notice.Infos.Count == 0) notice.Infos.Add(new SkillCdInfo { SkillId = group, CdStartTimestampMs = now, CdEndTimestampMs = left });
+        }
+        if (notice.Infos.Count > 0) await s.SendGameAsync(SkillCdUpdate, notice);
+    }
+
     private async Task StartCooldownAsync(GameSession s, JsonElement row, int? askedMode = null)
     {
+        if (ShadowEchoWaits(s, row)) return;
         if ((s.GmCombat & GmCombatSwitches.NoCooldown) != 0) return; // GmNoCD / GmUnlimit 1: no skill cooldown starts
         int group = (int)GameData.Int(row, "_iSkillID"), mode = (int)GameData.Int(row, "_iMode");
         var stats = _character.Stats(s);
@@ -674,7 +708,7 @@ public sealed partial class CombatService
         // One pressed in mid-walk is the exception: the client walks on (PlayerMoved).
         if (actor == null && !s.Walking && new SkillConfig(row).Movement == 0)
             SceneService.HoldWalk(s, DateTime.UtcNow.AddMilliseconds(leadMs + action.ChantMs + action.ActionMs), s.Walking);
-        s.WorldState.ResurrectionCastId = Script(row) == "Resurrection" ? id : 0;
+        s.WorldState.ResurrectionCastId = IsResurrection(row) ? id : 0;
         s.Face = face;
         req.Face = face;
         Task Timeline() => SendCastTimelineAsync(s, new UseInSkillInfo
@@ -687,7 +721,7 @@ public sealed partial class CombatService
         var template = _data.SkillTemplate(GameData.Int(row, "_iScriptShow"));
         var points = template is { } t ? Numbers(t, "m_kAtkPoints") : [];
         double point = points.FirstOrDefault(0.2);
-        int at = Script(row) == "Resurrection" ? action.ChantMs : ImpactOffset(template, point, action.ChantMs, action.ActionMs);
+        int at = IsResurrection(row) ? action.ChantMs : ImpactOffset(template, point, action.ChantMs, action.ActionMs);
         ScheduleRuntime(action.WorldScene, TimeSpan.FromMilliseconds(leadMs + at), async () =>
         {
             if (!Live(s, action)) return;
@@ -754,10 +788,11 @@ public sealed partial class CombatService
     /// <summary>
     /// LC_State_Unit_Skill ends a skill in its action phase when StatusForbidden holds SkillCast. (inferred) SkillChant does the
     /// same for the chant, which is what the name says, though the client's own use of it was not found. So Sleep and Silence
-    /// break a cast, and Stun or Freeze, whose _kForbidden has neither, do not.
+    /// break a cast, and Stun or Freeze, whose _kForbidden has neither, do not. Card: Phen keeps a cast through them. OPEN: this only keeps the
+    /// server's cast; the forbid bits still go out, and LC_State_Unit_Skill may end the skill on the client by them (needs a client test).
     /// </summary>
     private Task BreakForbiddenCastAsync(GameSession s) =>
-        s.SkillCast is { Cancelled: false } cast
+        s.SkillCast is { Cancelled: false } cast && !ControlCannotInterrupt(s)
         && _buffs.HasForbidden(s, Now - cast.StartMs < cast.ChantMs ? ForbiddenState.SkillChant : ForbiddenState.SkillCast)
             ? CancelCastAsync(s, SkillInterruptedInfo.Types.SkillInterruptType.State) : Task.CompletedTask;
 

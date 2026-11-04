@@ -269,6 +269,9 @@ public sealed partial class CombatService : IGameTicker
     public List<Func<GameSession, long, long>> ExtraHeal { get; } = [];
     public List<Func<MonsterUnit, GameSession, DamageHitResult, long, Task<long>>> IncomingDamageAdjusters { get; } = [];
     public List<Func<MonsterUnit, GameSession, long, Task>> TakenAsync { get; } = [];
+    /// <summary>The amount about to fall on a player, before any share, shield or lethal rule: the player, the row (a tick's buff row,
+    /// null without one), whether it is a skill's or a swing's hit rather than a tick, an environment or a fixed amount, the damage.</summary>
+    internal List<Func<GameSession, JsonElement?, bool, long, long>> PlayerDamageAdjusters { get; } = [];
     public List<Func<GameSession, Task>> PlayerRevived { get; } = [];
     /// <summary>A match owner decides which skills a participant may cast (true/false), or defers (null).</summary>
     public Func<GameSession, int, bool?>? MatchSkillRule { get; set; }
@@ -293,6 +296,8 @@ public sealed partial class CombatService : IGameTicker
     /// VehicleSeatConfig _kMainSkills / _kSkills); their cooldowns are the ordinary SkillConfig ones.
     /// </summary>
     public List<Func<GameSession, int, bool>> GrantedSkill { get; } = [];
+    /// <summary>The player fires this skill from a seat with a crosshair (DungeonService.Cannon): the client names what it aims at.</summary>
+    public Func<GameSession, int, bool>? AimsFromSeat { get; set; }
     /// <summary>World-core owns the dead player's explicit accept/decline invitation.</summary>
     public Func<GameSession, GameSession, JsonElement, Task>? ReviveOffer { get; set; }
     public Func<GameSession, int>? ReviveCheck { get; set; }
@@ -331,6 +336,8 @@ public sealed partial class CombatService : IGameTicker
         scene.Leaving.Add(ClearSceneSkillProtocolAsync);
         skills.QueueEligibility = CanQueueSkill;
         character.ProgressHandlers.Add(buffs.ReconcileEnergyAsync);
+        CastResolved.Add(ReadingExtraCastAsync);
+        CastResolved.Add(ClassLoopsOnCastAsync);
         monsters.AttackPet = MonsterAttackPetAsync;
         buffs.UnitChanged.Add(PublishTowerPetStatsAsync);
         WireBuffRules();
@@ -355,6 +362,18 @@ public sealed partial class CombatService : IGameTicker
     /// Bolt 1200411, Lightning Bolt 1200503, Double Strafe 1300304) showed no hit; the bullet goes in 31120 instead
     /// (<see cref="BulletEffect"/>).
     /// </summary>
+    /// <summary>A heal's hit effect. HitEffect's fallback 1000002 plays ReceivingDamage, so a healed ally flinched: EffectData 14007800 and its family (show * 1000 + 800) hold only
+    /// the heal's own effect. Then any of the show's effects with no hit reaction, then none (inferred).</summary>
+    private int HealEffect(long scriptShow)
+    {
+        var effects = _data.SkillTemplateTable("Lua_Config_EffectData");
+        long own = scriptShow * 1000 + 800;
+        if (SkillEffectData.Find(effects, own) is { HasDamage: true }) return (int)own;
+        for (long id = scriptShow * 100; id < scriptShow * 100 + 100; id++)
+            if (SkillEffectData.Find(effects, id) is { HasDamage: true, HasHitReaction: false }) return (int)id;
+        return 0;
+    }
+
     private int HitEffect(long scriptShow)
     {
         var effects = _data.SkillTemplateTable("Lua_Config_EffectData");
@@ -600,7 +619,7 @@ public sealed partial class CombatService : IGameTicker
                     && p.WorldScene == targetScene && m.WorldScene == targetScene
                     && p.SceneGeneration == targetGeneration && ReferenceEquals(p.Attachment, targetLease)
                     && targetLease?.Cancelled != true,
-                sourceElement: m.Template.Element);
+                sourceElement: m.Template.Element, directHit: true);
             if (committed == null) return;
             (damage, long hp, _, long shieldDamage) = committed.Value;
             try
@@ -610,7 +629,7 @@ public sealed partial class CombatService : IGameTicker
                 var hit = new SkillHitInfo
                 {
                     SrcID = m.Uid, SkillId = m.Template.NormalSkill, ShowPoint = 1000002, SessionId = session, SrcElement = m.Template.Element,
-                    Dsts = { new DamageInfo { DstID = p.Role.Id, Damage = damage, SheildDamage = shieldDamage, HitResult = result, DstElement = 1, IsDead = hp == 0 } },
+                    Dsts = { new DamageInfo { DstID = p.Role.Id, Damage = damage, SheildDamage = shieldDamage, HitResult = result, DstElement = ArmorElement(p), IsDead = hp == 0 } },
                 };
                 await _world.ToUnitViewersAsync(m, SkillHit, hit);
                 if (!m.Viewers.Contains(p)) await p.SendGameAsync(SkillHit, hit);
@@ -630,7 +649,7 @@ public sealed partial class CombatService : IGameTicker
 
     /// <summary>One protected HP transition for monster and event hits; reserve lethal state before publication.</summary>
     private async Task<(long Damage, long Hp, long Effective, long ShieldDamage)?> CommitPlayerDamageAsync(GameSession target, long damage, JsonElement? row,
-        Func<bool>? valid = null, int sourceElement = 1)
+        Func<bool>? valid = null, int sourceElement = 1, bool directHit = false)
     {
         var targetRole = target.Role;
         using var held = await CharacterService.Lock(target);
@@ -638,6 +657,7 @@ public sealed partial class CombatService : IGameTicker
             || valid?.Invoke() == false) return null;
         // Owner's decision 2.11, deliberately past 1:1 (the client has no such rule): no damage during a cutscene, at most 120 s.
         if (damage > 0 && target.InCutScene && target.CutSceneSinceMs > 0 && Now - target.CutSceneSinceMs <= CutSceneProtectionMs) damage = 0;
+        if (damage > 0) foreach (var adjust in PlayerDamageAdjusters) damage = adjust(target, row, directHit, damage);
         damage = ShareDevotedDamage(target, damage);
         // A missed/fully absorbed hit must not spend a finite Safety Wall charge.
         // GmUnlimit's invincibility (inferred): the hit lands as 0, like a Safety Wall.
@@ -746,7 +766,7 @@ public sealed partial class CombatService : IGameTicker
     }
 
     /// <summary>The roll-free part of a hit: skill ratio and flat, defense and element.</summary>
-    private double BaseDamage(Fighter a, Fighter b, JsonElement skill, int branch, out bool magic)
+    private double BaseDamage(Fighter a, Fighter b, JsonElement skill, int branch, out bool magic, bool attack = true)
     {
         magic = GameData.Int(skill, "_iDmgType") == 2;
         var ratios = Numbers(skill, "_kDamageParam1");
@@ -754,11 +774,12 @@ public sealed partial class CombatService : IGameTicker
         double p1 = ratios.Length > branch ? ratios[branch] : 10000, p2 = flats.Length > branch ? flats[branch] : 0;
         // A player's _kDamageFormulaExtra raises the percentage, not the flat part.
         double percent = a.Attributes is { } sheet ? p1 * DamageFormula.Factor(new Data.Config.SkillConfig(skill), branch, sheet) : p1;
-        double dmg = DamageSource(skill, a.Atk, a.Matk, magic) * percent / 10000 + p2;
+        double dmg = DamageSource(skill, a.Atk, a.Matk, magic) * percent / 10000 + p2 + DamageFormula.Flat(new Data.Config.SkillConfig(skill), branch);
         long Penetration(int id) => a.Attributes?.Invoke(id) ?? 0;
         dmg *= DefenseFactor(a.Level, magic
             ? DamageAttributes.DefenseAfterPenetration(b.Mdef, Penetration(DamageAttributes.IgnoreMdef), Penetration(DamageAttributes.IgnoreMdefPercent))
             : DamageAttributes.DefenseAfterPenetration(b.Def, Penetration(DamageAttributes.IgnoreDef), Penetration(DamageAttributes.IgnoreDefPercent)));
+        if (attack) dmg = Math.Max(0, dmg + DamageAttributes.FlatBonus(a.Attributes, b.Attributes, magic));
         // Element: EleConfig row = defender element, column = attacker element (/10000), clamped [0.1, 10].
         int element = (int)GameData.Int(skill, "_iEleType") is var se and > 1 ? se : a.Element;
         dmg *= Math.Clamp(1 + ElementFactor(element, b.Element) / 10000.0, 0.1, 10);
@@ -776,7 +797,7 @@ public sealed partial class CombatService : IGameTicker
     /// </summary>
     internal static double DamageSource(JsonElement skill, double atk, double matk, bool magic) => new Data.Config.SkillConfig(skill).SkillId switch
     {
-        12201 => matk,
+        12201 or 14316 => matk, // 14316: Double Holy Light's "Neutral ranged Physical damage equal to your Magic ATK"
         15210 or 15240 => atk + matk,
         _ => magic ? matk : atk,
     };
@@ -815,7 +836,7 @@ public sealed partial class CombatService : IGameTicker
         var asTarget = new Fighter(0, 0, m.Flee, 0, m.Level, m.Element) { Def = m.Def, Mdef = m.Mdef, Flee = m.Flee, Race = m.Race, Size = m.Size, Kind = KindOf(m) };
         double playerDps = ExpectedDamage(player, asTarget, playerSkill) * 1000.0 / Math.Max(1, SkillMs(p, playerSkill));
         var monster = new Fighter(m.Atk, m.Matk, m.Hit, m.Cri, m.Level, m.Element) { Race = m.Race, Size = m.Size, Kind = KindOf(m) };
-        var defender = new Fighter(0, 0, 0, 0, p.Progress.Level, 1)
+        var defender = new Fighter(0, 0, 0, 0, p.Progress.Level, ArmorElement(p))
         { Def = stats[105], Mdef = stats[106], Flee = stats[110], ResCri = stats[112], Attributes = attributes, Race = PlayerRace, Size = PlayerSize };
         double monsterHit = _data.Row("SkillConfig", m.NormalSkill) is { } row ? ExpectedDamage(monster, defender, row) : Math.Max(1, m.Atk);
         return (playerDps, monsterHit * 1000.0 / Math.Max(1, m.SwingIntervalMs), stats[101]);

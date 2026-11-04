@@ -16,6 +16,7 @@ public sealed partial class CombatService
 {
     private const int ParryGroup = 11210, ShieldReflectGroup = 11404, ReflectDamageGroup = 11610, ShrinkGroup = 11409, DeathBoundGroup = 11311;
     private const int AutoCounterGroup = 11105, AutoGuardGroup = 11403, DevotionGroup = 11504;
+    private const int ReflectGrantsStancePercent = 50;
     private const long ParryCooldownMs = 1000, ReflectDamageCooldownMs = 500, ShrinkCooldownMs = 3000, DeathBoundCooldownMs = 200;
     private const long ShrinkSkill = 1141600, DeathBoundSkill = 1131100, AutoCounterSkill = 1110500;
 
@@ -35,6 +36,15 @@ public sealed partial class CombatService
         SkillConfig.Get(_data, named >= 1_000_000 ? named : named * 100 + Math.Max(1, buff.ConfigId % 100));
 
     private static float FaceTo(Vec3 from, Vec3 to) => (float)(Math.Atan2(to.X - from.X, to.Z - from.Z) * 180 / Math.PI);
+
+    /// <summary>A card's answer to a hit on its holder: the holder, the player who struck (null for a monster), the row, what it took (CardEffects).</summary>
+    internal List<Func<GameSession, GameSession?, JsonElement?, long, Task>> CardHitReactions { get; } = [];
+
+    /// <summary>A fixed hit from the holder on the player who struck, after the hit in hand has gone out. Like every hit on a player it may
+    /// kill, and it answers only while the holder can still fight that player.</summary>
+    internal void StrikeBackLater(GameSession holder, SkillConfig row, long damage, GameSession enemy) => _loop.PostRuntime(() =>
+        !CanPlayerHit(holder, enemy) ? Task.CompletedTask
+            : CastExtraOnPlayerAsync(holder, new SkillConfig(row.AsFixedHit(damage)), enemy), "card reflect");
 
     /// <summary>After a hit landed on a player. <paramref name="row"/> is the attacker's row, null when it has none.</summary>
     internal async Task ReactToHitAsync(GameSession p, MonsterUnit? monster, GameSession? enemy, JsonElement? row, long damage)
@@ -74,6 +84,7 @@ public sealed partial class CombatService
                 // "When you are hit, deals ... to up to ${3} enemies within a ${4}-meter radius ... up to 1 times every 0.5 seconds."
                 case ReflectDamageGroup when ReactionReady(p, group, ReflectDamageCooldownMs):
                     await StrikeBackAsync(p, counter, [.. MonstersNear(p, p.Position, counter.DistanceMax / 100f).Take((int)Math.Max(1, counter.TargetMax))], enemy);
+                    if (Rolls.Proc(100) < ReflectGrantsStancePercent) await _buffs.AddShieldStanceAsync(p); // Powerful Shield Bash: "[Reflect Damage] ... 50% Chance ... 1 stack of [Shield Stance]"
                     break;
                 // "While [Auto Guard] is active, taking damage from an attacker within ${5} meters has a ${2}% Chance to inflict [Stun]".
                 case ShrinkGroup when p.Buffs.Any(b => b.ExpireMs > Now && b.ConfigId / 100 == AutoGuardGroup)
@@ -91,6 +102,7 @@ public sealed partial class CombatService
                     }
             }
         }
+        foreach (var react in CardHitReactions) await react(p, enemy, row, damage);
     }
 
     private static double ParseDesc(string text) =>
