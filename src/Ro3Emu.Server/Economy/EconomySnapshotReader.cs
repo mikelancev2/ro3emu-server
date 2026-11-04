@@ -51,10 +51,10 @@ public static partial class EconomySnapshotReader
         ["personal"] = BlobFormat.Protobuf, ["personal_upvote"] = BlobFormat.Protobuf, ["popularity"] = BlobFormat.Protobuf,
         ["social_outfit"] = BlobFormat.Protobuf, ["emoji_info"] = BlobFormat.Protobuf,
         ["gifts"] = BlobFormat.Json, ["barroom"] = BlobFormat.Json, ["gm_state"] = BlobFormat.Json,
-        ["job_exp_catchup"] = BlobFormat.Json
+        ["job_exp_catchup"] = BlobFormat.Json, ["offline_buffs"] = BlobFormat.OfflineBuffs
     };
 
-    private enum BlobFormat { Json, Protobuf, Mailbox, TerritoryRole, RawEpoch, StringSet }
+    private enum BlobFormat { Json, Protobuf, Mailbox, TerritoryRole, RawEpoch, StringSet, OfflineBuffs }
     private sealed class UnknownPersistedFieldException(string message) : Exception(message);
 
     /// <summary>Remaining unqualified families. E05e event envelopes do not imply whole-realm coverage.</summary>
