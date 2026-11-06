@@ -459,7 +459,10 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     /// mode panel saves those defaults (_applyPCInteractDefault) only when the chosen mode differs from the one it opened
     /// with, and its close/timeout path (_returnCloseClock) never does: a role that keeps Classic that way has no
     /// KeyBoardInfo, keyboard movement on and mouse movement off, so no ground cell under the cursor and clicks do not
-    /// walk. Such settings get mouse movement and the Classic key map. True when they changed.
+    /// walk. (proven, VPS production data) a KeyBoardInfo saved with EnableKeyboardMove left at its proto3 default
+    /// (false) never reaches the wire: _processKeyBoardInfo reads that field back as nil, not false, and passes that
+    /// nil straight into SetEnableKeyboardMove before it ever calls SetEnableMouseMove, breaking the repair it was
+    /// meant to apply. Such settings get both movement flags and the Classic key map. True when they changed.
     /// </summary>
     internal static bool RepairClassicMovement(DBSettingInfo settings)
     {
@@ -475,7 +478,8 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
             try { keys = KeyBoardInfo.Parser.ParseFrom(keyBytes); }
             catch (InvalidProtocolBufferException) { keys = new KeyBoardInfo(); }
         }
-        if (keys.EnableMouseMove && keys.KeyBoardMode == oldSchool) return false;
+        if (keys.EnableKeyboardMove && keys.EnableMouseMove && keys.KeyBoardMode == oldSchool) return false;
+        keys.EnableKeyboardMove = true;
         keys.EnableMouseMove = true;
         keys.KeyBoardMode = oldSchool;
         settings.ClientSetting[(int)SettingType.KeyBoard] = keys.ToByteString();
