@@ -27,8 +27,9 @@ Ro3Emu.Server.Accounts.AuctionStore+Prebuy/<UnitPrice>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder#Account
 Ro3Emu.Server.Accounts.DonationOrder#AmountCents
 Ro3Emu.Server.Accounts.DonationOrder#CreatedUtc
-Ro3Emu.Server.Accounts.DonationOrder#Crystals
 Ro3Emu.Server.Accounts.DonationOrder#Currency
+Ro3Emu.Server.Accounts.DonationOrder#ItemCount
+Ro3Emu.Server.Accounts.DonationOrder#ItemEntry
 Ro3Emu.Server.Accounts.DonationOrder#OrderId
 Ro3Emu.Server.Accounts.DonationOrder#PackageId
 Ro3Emu.Server.Accounts.DonationOrder#PaidUtc
@@ -40,8 +41,9 @@ Ro3Emu.Server.Accounts.DonationOrder#StripeSessionId
 Ro3Emu.Server.Accounts.DonationOrder/<Account>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder/<AmountCents>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder/<CreatedUtc>k__BackingField
-Ro3Emu.Server.Accounts.DonationOrder/<Crystals>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder/<Currency>k__BackingField
+Ro3Emu.Server.Accounts.DonationOrder/<ItemCount>k__BackingField
+Ro3Emu.Server.Accounts.DonationOrder/<ItemEntry>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder/<OrderId>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder/<PackageId>k__BackingField
 Ro3Emu.Server.Accounts.DonationOrder/<PaidUtc>k__BackingField

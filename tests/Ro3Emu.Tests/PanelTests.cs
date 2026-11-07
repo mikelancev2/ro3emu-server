@@ -668,10 +668,13 @@ public sealed class PanelTests : IAsyncLifetime
         Assert.Equal(0, (await admin.GetJsonAsync("/api/admin/economy?asset=no-such-item")).GetProperty("total").GetInt32());
     }
 
+    /// <summary>Pads a short credential the same way BotClient.LoginAsync does, so it matches the hash stored for an
+    /// account InWorldAsync registered (WebsiteAccountEndpoints requires an 8+ character password).</summary>
     internal static async Task<int> SdkLoginAsync(SyntheticHost host, string identity, string credential)
     {
+        string password = credential.Length < 8 ? credential.PadRight(8, '0') : credential;
         using var client = new HttpClient();
-        using var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = identity, ["credential"] = credential });
+        using var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = identity, ["credential"] = password });
         var body = await (await client.PostAsync(host.Http + SdkEndpoints.LoginPath, form)).Content.ReadFromJsonAsync<JsonElement>();
         return body.GetProperty("code").GetInt32();
     }
@@ -717,7 +720,10 @@ public sealed class PanelTests : IAsyncLifetime
             return response;
         }
 
-        public Task<HttpResponseMessage> LoginAsync(string account, string password) => PostAsync("/api/login", new { account, password });
+        /// <summary>Pads a short credential the same way BotClient.LoginAsync does, so it matches the hash stored for
+        /// an account InWorldAsync registered (WebsiteAccountEndpoints requires an 8+ character password).</summary>
+        public Task<HttpResponseMessage> LoginAsync(string account, string password) =>
+            PostAsync("/api/login", new { account, password = password.Length < 8 ? password.PadRight(8, '0') : password });
 
         public Task<HttpResponseMessage> RegisterAsync(string account, string password) => PostAsync("/api/register", new { account, password });
 

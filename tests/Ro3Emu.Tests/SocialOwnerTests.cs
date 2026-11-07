@@ -205,9 +205,11 @@ public sealed class SocialOwnerTests : IAsyncLifetime
 
         await DisposeDetachedAsync(deleted, d);
         using (var http = new HttpClient())
+        // Padded like BotClient.LoginAsync pads it, to match the hash stored for the account it registered
+        // (WebsiteAccountEndpoints requires an 8+ character password).
         using (var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {
-            ["identity"] = "deleteddonor", ["credential"] = "pw", ["role"] = d.ToString(),
+            ["identity"] = "deleteddonor", ["credential"] = "pw000000", ["role"] = d.ToString(),
         }))
         {
             var response = await http.PostAsync(_http + "/ro3emu/account/delete-role", form);

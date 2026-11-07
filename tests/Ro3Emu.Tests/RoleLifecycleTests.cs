@@ -82,11 +82,13 @@ public sealed class RoleLifecycleTests : IAsyncLifetime
 
     private BotClient Bot() => new(_http, File.ReadAllText(Path.Combine(_directory, "gate_rsa_public.pem")));
 
+    /// <summary>Pads a short credential the same way BotClient.LoginAsync does, so it matches the hash stored for
+    /// an account it registered (WebsiteAccountEndpoints requires an 8+ character password).</summary>
     private async Task<int> Delete(string account, string password, string role)
     {
         using var client = new HttpClient();
         using var response = await client.PostAsync($"{_http}/ro3emu/account/delete-role", new FormUrlEncodedContent(
-            new Dictionary<string, string> { ["identity"] = account, ["credential"] = password, ["role"] = role }));
+            new Dictionary<string, string> { ["identity"] = account, ["credential"] = password.Length < 8 ? password.PadRight(8, '0') : password, ["role"] = role }));
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return json.RootElement.GetProperty("code").GetInt32();
     }

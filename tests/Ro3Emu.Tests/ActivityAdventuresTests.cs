@@ -1080,7 +1080,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
         using (var client = new HttpClient())
         using (var response = await client.PostAsync($"{_http}/ro3emu/account/delete-role",
             new FormUrlEncodedContent(new Dictionary<string, string>
-            { ["identity"] = "alice", ["credential"] = "pw", ["role"] = "Alice" })))
+            { ["identity"] = "alice", ["credential"] = "pw000000", ["role"] = "Alice" })))
         using (var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
             Assert.Equal(0, json.RootElement.GetProperty("code").GetInt32());
         await bob.SendGameAsync(NewActivityService.Common, new CommonActivityReq
@@ -1159,7 +1159,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
                     using var client = new HttpClient();
                     using var response = await client.PostAsync($"{_http}/ro3emu/account/delete-role",
                         new FormUrlEncodedContent(new Dictionary<string, string>
-                        { ["identity"] = "alice", ["credential"] = "pw", ["role"] = "Alice" }));
+                        { ["identity"] = "alice", ["credential"] = "pw000000", ["role"] = "Alice" }));
                     using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
                     Assert.Equal(0, json.RootElement.GetProperty("code").GetInt32());
                 });

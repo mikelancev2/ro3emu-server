@@ -332,11 +332,13 @@ public sealed class CharacterTests : IAsyncLifetime
             await bot.CreateRoleAsync("Carol2");
         }
         using var http = new HttpClient();
+        // Pads a short credential the same way BotClient.LoginAsync does, so it matches the hash stored for an
+        // account it registered (WebsiteAccountEndpoints requires an 8+ character password).
         async Task<int> Delete(string password, string role)
         {
             var resp = await http.PostAsync($"{_http}/ro3emu/account/delete-role", new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                ["identity"] = "carol", ["credential"] = password, ["role"] = role,
+                ["identity"] = "carol", ["credential"] = password.Length < 8 ? password.PadRight(8, '0') : password, ["role"] = role,
             }));
             using var json = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
             return json.RootElement.GetProperty("code").GetInt32();

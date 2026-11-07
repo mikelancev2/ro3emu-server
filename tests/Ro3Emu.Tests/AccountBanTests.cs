@@ -134,7 +134,7 @@ public sealed class AccountBanTests : IAsyncLifetime
         Assert.Null(await accounts.VerifiedAccountAsync("ban-paths", "pw"));
         Assert.False(accounts.Verify("ban-paths", "pw"));
         using var form = new FormUrlEncodedContent(new Dictionary<string, string>
-        { ["identity"] = "ban-paths", ["credential"] = "pw", ["role"] = "1" });
+        { ["identity"] = "ban-paths", ["credential"] = "pw000000", ["role"] = "1" });
         var deleted = await (await PostAsync("/ro3emu/account/delete-role", form)).Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(401, deleted.GetProperty("code").GetInt32());
 
@@ -169,9 +169,12 @@ public sealed class AccountBanTests : IAsyncLifetime
         Assert.Equal(0L, (long)cmd.ExecuteScalar()!);
     }
 
+    /// <summary>Pads a short credential the same way BotClient.LoginAsync does, so it matches the hash stored for an
+    /// account it registered (WebsiteAccountEndpoints requires an 8+ character password).</summary>
     private async Task<string> SdkLoginBodyAsync(string identity, string credential)
     {
-        using var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = identity, ["credential"] = credential });
+        string password = credential.Length < 8 ? credential.PadRight(8, '0') : credential;
+        using var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = identity, ["credential"] = password });
         return await (await PostAsync(SdkEndpoints.LoginPath, form)).Content.ReadAsStringAsync();
     }
 

@@ -49,9 +49,9 @@ public sealed class LoadTestProtocolTests
         bot.OnStageStarted = started.Add;
         bot.OnStageFinished = (name, ms, error) => finished.Add((name, ms, error));
         await Assert.ThrowsAnyAsync<Exception>(() => bot.LoginAsync("missing", "missing"));
-        Assert.Equal(["sdk-login"], started);
+        Assert.Equal(["register"], started);
         Assert.Single(finished);
-        Assert.Equal("sdk-login", finished[0].Name);
+        Assert.Equal("register", finished[0].Name);
         Assert.True(finished[0].Ms >= 0);
         Assert.NotNull(finished[0].Error);
         Assert.Equal(0, bot.WireInboundBytes);

@@ -413,8 +413,10 @@ public sealed class PanelAdminTests : IAsyncLifetime
         Assert.Equal((10111L, 12.5f, -4f), (moved.SceneEntry, moved.X, moved.Z));
         Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync($"/api/admin/characters/{id}/teleport", new { map = 99999 })).StatusCode);
 
+        // Padded like BotClient.LoginAsync pads it, to match the hash stored for the account it registered
+        // (WebsiteAccountEndpoints requires an 8+ character password).
         using (var client = new HttpClient())
-        using (var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = "wanderer", ["credential"] = "pw", ["role"] = "Strider" }))
+        using (var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["identity"] = "wanderer", ["credential"] = "pw000000", ["role"] = "Strider" }))
             Assert.Contains("deleted", await (await client.PostAsync(_host.Http + "/ro3emu/account/delete-role", form)).Content.ReadAsStringAsync());
         var deleted = Assert.Single((await admin.GetJsonAsync("/api/admin/accounts/wanderer/deleted")).GetProperty("characters").EnumerateArray());
         Assert.Equal("Strider", deleted.GetProperty("name").GetString());

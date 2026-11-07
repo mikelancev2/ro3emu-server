@@ -26,6 +26,7 @@ public sealed class AccountEndpointTests : IAsyncLifetime
             options.HttpPort = httpPort;
             options.MicroGatePort = microPort;
             options.GameGatePort = gamePort;
+            options.RefuseUnknownAccounts = true;
         });
         await _app.StartAsync();
         _root = $"http://127.0.0.1:{httpPort}";
