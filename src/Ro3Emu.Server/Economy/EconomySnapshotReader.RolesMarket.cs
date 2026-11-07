@@ -125,16 +125,6 @@ public static partial class EconomySnapshotReader
                     Issue(EconomyIssueKind.RecoveryDebt, key, "Committed award has required task follow-up pending.");
                 return;
             }
-            if (format == BlobFormat.OfflineBuffs)
-            {
-                // BuffService.OfflineState persists kept buffs' stat deltas, not a balance: nothing here is a tradeable asset.
-                foreach (var buff in Elements(doc.RootElement))
-                {
-                    Fields(buff, "ConfigId ExpireMs DurationMs SourceId PileCount Changes");
-                    foreach (var change in Elements(Prop(buff, "Changes"))) Fields(change, "Attr Value");
-                }
-                return;
-            }
             if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException("Expected JSON object.");
             if (format != BlobFormat.Mailbox) ValidateRoleJson(name, doc.RootElement, key);
             switch (format)
