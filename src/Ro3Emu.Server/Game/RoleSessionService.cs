@@ -473,31 +473,26 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     /// is saved (or MovementCtrl is 2) and falls back to the mode's defaults only when both movement flags are off. The
     /// mode panel saves those defaults (_applyPCInteractDefault) only when the chosen mode differs from the one it opened
     /// with, and its close/timeout path (_returnCloseClock) never does: a role that keeps Classic that way has no
-    /// KeyBoardInfo, keyboard movement on and mouse movement off, so no ground cell under the cursor and clicks do not
-    /// walk. (proven, VPS production data) a KeyBoardInfo saved with EnableKeyboardMove left at its proto3 default
-    /// (false) never reaches the wire: _processKeyBoardInfo reads that field back as nil, not false, and passes that
-    /// nil straight into SetEnableKeyboardMove before it ever calls SetEnableMouseMove, breaking the repair it was
-    /// meant to apply. Such settings get both movement flags and the Classic key map. True when they changed.
+    /// KeyBoardInfo at all, keyboard movement on and mouse movement off, so no ground cell under the cursor and clicks do
+    /// not walk. Repairs only that exact gap (no KeyBoardInfo saved yet): a saved KeyBoardInfo, including one a player set
+    /// through the Button tab (UI_Sys_Setup_ButtonWidgetCtrl.m_bNowEnableMouseMove), is their own choice and is left alone.
+    /// The repair writes exactly ClientConfig.lua's PCInteractSetting.Nostalgic: EnableMouseMove true, EnableKeyboardMove
+    /// false, SelectBtn/MoveBtn 1 (Left), CameraMode 2 (RightDrag). True when it repaired.
     /// </summary>
     internal static bool RepairClassicMovement(DBSettingInfo settings)
     {
-        const int oldSchool = 1;
+        const int oldSchool = 1, left = 1, rightDrag = 2;
         if (!settings.ClientSetting.TryGetValue((int)SettingType.GameMode, out var modeBytes)) return false;
         GameModeSetting mode;
         try { mode = GameModeSetting.Parser.ParseFrom(modeBytes); }
         catch (InvalidProtocolBufferException) { return false; }
         if (mode.GameMode != oldSchool) return false;
-        var keys = new KeyBoardInfo();
-        if (settings.ClientSetting.TryGetValue((int)SettingType.KeyBoard, out var keyBytes))
+        if (settings.ClientSetting.ContainsKey((int)SettingType.KeyBoard)) return false;
+        settings.ClientSetting[(int)SettingType.KeyBoard] = new KeyBoardInfo
         {
-            try { keys = KeyBoardInfo.Parser.ParseFrom(keyBytes); }
-            catch (InvalidProtocolBufferException) { keys = new KeyBoardInfo(); }
-        }
-        if (keys.EnableKeyboardMove && keys.EnableMouseMove && keys.KeyBoardMode == oldSchool) return false;
-        keys.EnableKeyboardMove = true;
-        keys.EnableMouseMove = true;
-        keys.KeyBoardMode = oldSchool;
-        settings.ClientSetting[(int)SettingType.KeyBoard] = keys.ToByteString();
+            KeyBoardMode = oldSchool, EnableMouseMove = true, EnableKeyboardMove = false,
+            SelectBtn = left, MoveBtn = left, CameraMode = rightDrag,
+        }.ToByteString();
         return true;
     }
 
