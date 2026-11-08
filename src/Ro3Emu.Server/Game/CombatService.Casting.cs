@@ -139,17 +139,12 @@ public sealed partial class CombatService
             return;
         }
         if (lease?.Cancelled == true || !ReferenceEquals(s.Attachment, lease) ||
-            s.SceneGeneration != scene || s.WorldScene != worldScene || s.SceneLoading)
-        {
-            _log.LogInformation("{Name} skill {Skill} dropped: attachment/scene changed during cost admission", s.Role?.Name, req.SkillId);
-            return;
-        }
+            s.SceneGeneration != scene || s.WorldScene != worldScene || s.SceneLoading) return;
         int turn = owned == null ? SwingLeft(s.SkillCast, row!.Value) : 0;
         await CancelCastAsync(s, SkillInterruptedInfo.Types.SkillInterruptType.Skill);
         _eventAttacks.Remove(s);
         await PayCostsAsync(s, costs);
         if (!unlimited) await _buffs.SpendEnergyAsync(s, row!.Value);
-        _log.LogInformation("{Name} casts skill {Skill} ({Script})", s.Role?.Name, req.SkillId, Script(row!.Value));
         int lead = (owned == null && BeforeCast is { } before ? await before(s) : 0) + turn;
         if (!lineup) await s.SendGameAsync(UseSkill, new CastSkillRsp { SessionId = id, IsAutoCast = req.IsAutoCast });
         var target = FindMonster(s.WorldScene, req.TargetId);
@@ -287,7 +282,6 @@ public sealed partial class CombatService
     // Refusal must not interrupt a different accepted cast: the client does not compare 31103.sessionId.
     private async Task RefuseCoreAsync(GameSession s, CastSkillReq req, int error, long parameter)
     {
-        _log.LogInformation("{Name} skill {Skill} refused: {Error} ({Parameter})", s.Role?.Name, req.SkillId, error, parameter);
         var reply = new CastSkillRsp { Result = error, IsAutoCast = req.IsAutoCast };
         if (parameter != 0) reply.Params.Add(parameter);
         await s.SendGameAsync(UseSkill, reply);
@@ -358,8 +352,19 @@ public sealed partial class CombatService
     /// that time has shown its hit on the client by the time the client sends the next skill: a held key
     /// (enum_SkillReleaseType.HoldContinue, _iPcReleasingSkill, UI_Sys_Main_JoyStickSkillWidgetBaseCtrl.OnInputKey) sends
     /// one every 0.2 s. <see cref="SwingJitterMs"/> lets the next one in that much early, where the hit could still be ahead
-    /// on the server. Not currently used by CancelCastAsync (see its comment); kept, and tested, for whoever resolves that.
+    /// on the server: Turn Undead hits at 2.283 s of its show and yields from 2.367 s, so a held Turn Undead lost a third of
+    /// its hits. Such a hit lands as the skill yields.
     /// </summary>
+    private bool HitShownBeforeYield(ActiveSkillCast action)
+    {
+        var skill = new SkillConfig(action.Row);
+        if (action.Cancelled || action.Resolved || skill.IsNormalAttack(_data) || Now < action.StartMs) return false;
+        var template = _data.SkillTemplate(skill.ScriptShow);
+        var points = SkillShow.AttackPoints(template);
+        return HitPrecedesYield(skill.InterruptedType, ImpactOffset(template, points.FirstOrDefault(0.2), action.ChantMs, action.ActionMs),
+            SkillShow.InterruptOffset(template, action.ChantMs, action.ActionMs), Now - action.StartMs);
+    }
+
     internal static bool HitPrecedesYield(long interruptedType, int impactMs, int? interruptMs, long elapsedMs) =>
         interruptedType == 2 && interruptMs is { } yield && impactMs <= yield && elapsedMs >= yield - SwingJitterMs;
 
@@ -812,11 +817,12 @@ public sealed partial class CombatService
     {
         s.WorldState.ResurrectionCastId = 0;
         if (s.SkillCast is not { } action) return;
-        // A held skill's late hit (HitShownBeforeYield) used to resolve here through ResolveCastAsync, but
-        // CastLanded/CastResolved handlers run reentrantly while the dispatcher still holds this session's
-        // reservation: seen live locking a role's StateLock indefinitely under repeated skill-interrupt traffic
-        // (rapid auto-attack rotations). Disabled 2026-11-08 until it has a non-reentrant way to resolve the held
-        // hit; a held Turn Undead loses its late hits again rather than risk another stuck game loop.
+        if (cause == SkillInterruptedInfo.Types.SkillInterruptType.Skill && HitShownBeforeYield(action))
+        {
+            action.Resolved = true;
+            await ResolveCastAsync(s, action);
+            if (!ReferenceEquals(s.SkillCast, action)) return;
+        }
         action.Cancelled = true;
         s.SkillCast = null;
         // The client lets a move end a swing only from the show's m_fInterruptTime_move, well after its hit. Without this a
