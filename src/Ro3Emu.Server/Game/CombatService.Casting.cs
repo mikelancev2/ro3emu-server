@@ -819,11 +819,18 @@ public sealed partial class CombatService
         if (s.SkillCast is not { } action) return;
         if (cause == SkillInterruptedInfo.Types.SkillInterruptType.Skill && HitShownBeforeYield(action))
         {
+            // The hit already shown to the client must still be credited, but resolving it can kill the target and
+            // commit its reward, which takes this session's CharacterService.Lock again -- already held by the cast
+            // this interrupts (production deadlock, 2026-11-08: a dotnet-dump of a stuck server showed the only live
+            // Releaser rooted in exactly this call chain). Credit it once that lock is free instead of nesting in it.
             action.Resolved = true;
-            await ResolveCastAsync(s, action);
-            if (!ReferenceEquals(s.SkillCast, action)) return;
+            _loop.TrackRuntimeDetached("interrupted swing late hit", async () =>
+            {
+                await ResolveCastAsync(s, action);
+                action.Cancelled = true;
+            });
         }
-        action.Cancelled = true;
+        else action.Cancelled = true;
         s.SkillCast = null;
         // The client lets a move end a swing only from the show's m_fInterruptTime_move, well after its hit. Without this a
         // step or a 31124 right after the hit, and a new swing, hits faster than the attack speed allows. A swing that killed
