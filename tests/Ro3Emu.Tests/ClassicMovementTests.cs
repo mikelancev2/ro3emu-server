@@ -32,9 +32,9 @@ public sealed class ClassicMovementTests
         Assert.True(keys.EnableMouseMove);
         Assert.False(keys.EnableKeyboardMove);
         Assert.Equal(1, keys.KeyBoardMode);
-        Assert.Equal(1, keys.SelectBtn);
-        Assert.Equal(1, keys.MoveBtn);
-        Assert.Equal(2, keys.CameraMode);
+        Assert.Equal(0, keys.SelectBtn); // enum_PCMouseBtn.Left
+        Assert.Equal(0, keys.MoveBtn); // enum_PCMouseBtn.Left
+        Assert.Equal(0, keys.CameraMode); // enum_PCCameraDragMode.RightDrag
     }
 
     [Fact]

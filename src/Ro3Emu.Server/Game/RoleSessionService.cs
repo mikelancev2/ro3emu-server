@@ -477,11 +477,12 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     /// not walk. Repairs only that exact gap (no KeyBoardInfo saved yet): a saved KeyBoardInfo, including one a player set
     /// through the Button tab (UI_Sys_Setup_ButtonWidgetCtrl.m_bNowEnableMouseMove), is their own choice and is left alone.
     /// The repair writes exactly ClientConfig.lua's PCInteractSetting.Nostalgic: EnableMouseMove true, EnableKeyboardMove
-    /// false, SelectBtn/MoveBtn 1 (Left), CameraMode 2 (RightDrag). True when it repaired.
+    /// false, SelectBtn/MoveBtn LC_DAL_Setting._processGameMode's (eSelectTargetKey/eMouseMoveKey - 1) = 0 (enum_PCMouseBtn
+    /// Left), CameraMode its eCameraDragKey(2) != 1 branch = 0 (enum_PCCameraDragMode RightDrag). True when it repaired.
     /// </summary>
     internal static bool RepairClassicMovement(DBSettingInfo settings)
     {
-        const int oldSchool = 1, left = 1, rightDrag = 2;
+        const int oldSchool = 1, left = 0, rightDrag = 0;
         if (!settings.ClientSetting.TryGetValue((int)SettingType.GameMode, out var modeBytes)) return false;
         GameModeSetting mode;
         try { mode = GameModeSetting.Parser.ParseFrom(modeBytes); }
