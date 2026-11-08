@@ -29,6 +29,11 @@ public sealed partial class BuffService
 
     private readonly List<PeriodicEffect> _periodic = [];
     private readonly Dictionary<long, PeriodicEffect> _periodicByGuid = [];
+    // One in-flight tick per target: two due effects on the same target (Poisoned and Bleeding together, say) each
+    // took CharacterService's StateLock through their own detached task, racing each other for it under heavy
+    // combat traffic. That contention left the lock permanently unavailable in production (seen locking a role out
+    // indefinitely). A busy target's other due effects wait for the next tick instead of racing in.
+    private readonly HashSet<long> _busyTargets = [];
 
     /// <summary>CombatService: who applied a buff (a player by role id, a monster by uid) in that world scene.</summary>
     internal Func<long, long, PeriodicSource?>? ResolvePeriodicSource { get; set; }
@@ -79,7 +84,7 @@ public sealed partial class BuffService
         for (int i = _periodic.Count - 1; i >= 0; i--)
         {
             var effect = _periodic[i];
-            if (effect.Busy || now < effect.NextMs) continue;
+            if (effect.Busy || now < effect.NextMs || !_busyTargets.Add(effect.TargetId)) continue;
             var buff = LiveBuff(effect);
             // A tick due at the expiry moment still lands (60 s of "per second" is 60 ticks).
             if (buff == null || effect.NextMs > buff.ExpireMs)
@@ -87,16 +92,17 @@ public sealed partial class BuffService
                 _periodic[i] = _periodic[^1];
                 _periodic.RemoveAt(_periodic.Count - 1);
                 _periodicByGuid.Remove(effect.Guid);
+                _busyTargets.Remove(effect.TargetId);
                 continue;
             }
             effect.NextMs += effect.Rule.IntervalMs;
             if (effect.NextMs <= now) effect.NextMs = now + effect.Rule.IntervalMs; // a late loop does not burst
-            if (PeriodicTick is not { } tick) continue;
+            if (PeriodicTick is not { } tick) { _busyTargets.Remove(effect.TargetId); continue; }
             effect.Busy = true;
             _loop.TrackRuntimeDetached("periodic buff tick", async () =>
             {
                 try { await tick(effect, buff); }
-                finally { effect.Busy = false; }
+                finally { effect.Busy = false; _busyTargets.Remove(effect.TargetId); }
             });
         }
     }
