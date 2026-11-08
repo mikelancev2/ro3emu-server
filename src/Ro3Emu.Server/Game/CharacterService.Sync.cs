@@ -187,13 +187,15 @@ public sealed partial class CharacterService
     }
 
     private static async Task<IDisposable> LockAsync(GameSession session, IReadOnlyList<Ownership.ReservationKey>? additionalKeys = null,
-        CancellationToken cancellation = default)
+        CancellationToken cancellation = default, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
         if (session.Progress == null) throw new InvalidOperationException("not in game");
         Ownership.LegacyOwnerScope? scope = null;
         long? roleId = session.Role?.Id;
         var attachment = session.Attachment;
         bool acquired = false;
+        long seq = System.Threading.Interlocked.Increment(ref StateLockTrace.Seq);
+        StateLockTrace.Log($"{seq} WAIT role={roleId} caller={caller}");
         try
         {
             if (session.Owners is { } owners)
@@ -201,6 +203,7 @@ public sealed partial class CharacterService
                     [Ownership.ReservationKey.Role(roleId!.Value), .. additionalKeys ?? []], cancellation);
             else await session.StateLock.WaitAsync(cancellation);
             acquired = true;
+            StateLockTrace.Log($"{seq} HELD role={roleId} caller={caller}");
             if (session.Role?.Id != roleId || !ReferenceEquals(session.Attachment, attachment))
                 throw new OperationCanceledException("Role changed before the character gate was acquired.");
             if (scope != null)
@@ -209,12 +212,12 @@ public sealed partial class CharacterService
                 if (session.Owner is { } owner) scope.Context.Pin(owner);
             }
         }
-        catch { if (acquired) session.StateLock.Release(); scope?.Dispose(); throw; }
-        return new Releaser(session.StateLock, scope);
+        catch { if (acquired) session.StateLock.Release(); scope?.Dispose(); StateLockTrace.Log($"{seq} FAILED role={roleId} caller={caller}"); throw; }
+        return new Releaser(session.StateLock, scope, seq, roleId, caller);
     }
 
-    private sealed class Releaser(SemaphoreSlim gate, IDisposable? scope = null) : IDisposable
+    private sealed class Releaser(SemaphoreSlim gate, IDisposable? scope = null, long seq = 0, long? roleId = null, string? caller = null) : IDisposable
     {
-        public void Dispose() { gate.Release(); scope?.Dispose(); }
+        public void Dispose() { if (caller != null) StateLockTrace.Log($"{seq} RELEASE role={roleId} caller={caller}"); gate.Release(); scope?.Dispose(); }
     }
 }
