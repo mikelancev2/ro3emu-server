@@ -8,7 +8,7 @@ namespace Ro3Emu.Server.Game;
 internal static class StateLockTrace
 {
     internal static long Seq;
-    private const string Path = "/root/ro3emu-server/data/statelock-trace.log";
+    private static readonly string Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "statelock-trace.log");
     private static readonly object Gate = new();
 
     internal static void Log(string line)
@@ -18,6 +18,6 @@ internal static class StateLockTrace
             lock (Gate)
                 File.AppendAllText(Path, $"{DateTime.UtcNow:O} {line}{Environment.NewLine}");
         }
-        catch (IOException) { }
+        catch { /* diagnostic only: never let a trace-write failure break the lock it is watching */ }
     }
 }
