@@ -611,4 +611,12 @@ public sealed class TaskRuntimeState
     public long FactionDay { get; set; }
     /// <summary>The Faction Quest points counted that day, the exceed past 1101000's 1000 included.</summary>
     public long FactionPoints { get; set; }
+    /// <summary>
+    /// Deliveries a GM !quest drop/reset forgot, per task. A delivery's reward ledger key counts the task's
+    /// deliveries (CompleteTaskNum + this), so handing a dropped quest in again is a new reward, not a replay of
+    /// the old one: without it, the next hand-in reused the ledger key of the delivery the drop erased, and the
+    /// economy rejected it as already committed.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<long, int>? Forgotten { get; set; }
 }

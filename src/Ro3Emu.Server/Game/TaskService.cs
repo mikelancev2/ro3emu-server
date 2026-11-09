@@ -435,11 +435,13 @@ public sealed partial class TaskService
         switch (op)
         {
             case "reset":
+                foreach (var (task, count) in session.Tasks.CompleteTaskNum) Forget(session, task, count);
                 session.Tasks = new DBTaskInfo();
                 Accept(session, FirstTask);
                 session.Tasks.CompleteTaskNum[FirstTask] = 0;
                 break;
             case "drop":
+                Forget(session, id, session.Tasks.CompleteTaskNum.GetValueOrDefault(id));
                 session.Tasks.Infos.Remove(id);
                 session.Tasks.CompleteTaskNum.Remove(id);
                 break;
@@ -460,6 +462,13 @@ public sealed partial class TaskService
         }
         await SettleAsync(session);
         return $"{op} {id}: {Describe(session)}";
+    }
+
+    private static void Forget(GameSession session, long task, int deliveries)
+    {
+        if (deliveries <= 0) return;
+        var forgotten = session.TaskRuntime.Forgotten ??= [];
+        forgotten[task] = forgotten.GetValueOrDefault(task) + deliveries;
     }
 
     public string Describe(GameSession session) => session.Tasks == null ? "-" :
@@ -634,15 +643,19 @@ public sealed partial class TaskService
             {
                 CompletedGuides = [.. session.TaskRuntime.CompletedGuides], InCutScene = session.InCutScene || cutScene,
                 FactionDay = session.TaskRuntime.FactionDay, FactionPoints = session.TaskRuntime.FactionPoints,
+                Forgotten = session.TaskRuntime.Forgotten is { } forgotten ? new(forgotten) : null,
             };
-            string awardSource = $"task/{session.Role!.Id}/{id}/{next.CompleteTaskNum[id]}/" +
+            // A GM drop forgets CompleteTaskNum without a trace, so a later hand-in's own count would reuse an
+            // earlier delivery's ledger key; Forgotten keeps every delivery counted, dropped or not.
+            int delivery = next.CompleteTaskNum[id] + (session.TaskRuntime.Forgotten?.GetValueOrDefault(id) ?? 0);
+            string awardSource = $"task/{session.Role!.Id}/{id}/{delivery}/" +
                 $"{session.Daily?.DailyEpoch ?? 0}/{session.Daily?.WeeklyEpoch ?? 0}";
             if (!await _character.ApplyAwardAsync(session, plan, def.Exp, costs, next.ToByteArray(),
                 JsonSerializer.SerializeToUtf8Bytes(runtime), expectedDaily: daily?.Before, nextDaily: daily?.After,
                 expectedTasks: expectedTasks, persist: questMount is { } ride ? tx => _mounts.PersistQuestRide(session, ride, tx) : null,
                 committed: questMount is { } appliedRide ? () => _mounts.ApplyQuestRideCore(session, context, appliedRide) : null,
                 ownedAward: new CharacterService.OwnedAwardSource("cd13e/quest-award", awardSource,
-                    new { Version = 1, Task = id, Count = next.CompleteTaskNum[id], plan.AwardId })))
+                    new { Version = 1, Task = id, Count = delivery, plan.AwardId })))
                 return daily == null ? ErrorCodes.ItemsShort : ErrorCodes.Unknown;
             session.TaskRuntime = runtime;
             deliveredPlan = plan;
