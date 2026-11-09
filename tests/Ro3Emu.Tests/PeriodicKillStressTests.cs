@@ -16,6 +16,9 @@ namespace Ro3Emu.Tests;
 /// (CombatService -> RewardService.CommitKillAsync, each taking CharacterService.Lock) racing against the periodic
 /// damage ticks (BuffService.TickPeriodic -> CombatService.PeriodicPlayerDamageAsync, also taking it) is the closest
 /// match found by code reading; this stresses exactly that combination to see whether it actually deadlocks.
+/// GmUnlimit's invincibility keeps the role itself alive against its own Poisoned/Bleeding ticks (CommitPlayerDamageAsync
+/// zeroes any incoming damage for it): without it those two debuffs killed a fresh level-1 role in one tick, which
+/// made every later cast refuse as SkillBadState and looked exactly like the lock being stuck.
 /// </summary>
 public sealed class PeriodicKillStressTests : IAsyncLifetime
 {
@@ -68,6 +71,7 @@ public sealed class PeriodicKillStressTests : IAsyncLifetime
         const int Poisoned = 903001, Bleeding = 902901;
         var monsters = await Service<GameLoop>().InvokeAsync<List<MonsterUnit>>(async () =>
         {
+            player.GmCombat |= GmCombatSwitches.Unlimited; // survive its own Poisoned/Bleeding ticks; see class doc
             await Service<BuffService>().AddAsync(player, Poisoned, 30000, player.Role!.Id);
             await Service<BuffService>().AddAsync(player, Bleeding, 30000, player.Role!.Id);
             var service = Service<MonsterService>();
@@ -83,22 +87,26 @@ public sealed class PeriodicKillStressTests : IAsyncLifetime
             return list;
         });
 
-        // Fire every kill back-to-back, not waiting for each one's own confirmation: this is what lets many
-        // CommitKillAsync calls (and the periodic ticks landing in the same window) race for the same lock.
-        var sent = new List<(long Uid, Task<BotEvent> Hit)>();
+        // A normal attack cast at a new target cancels the swing in flight (CancelCastAsync) rather than running
+        // alongside it, and CastCoreAsync's "turn" carries the cancelled swing's remaining time into the next one's
+        // lead: targeting 20 monsters back-to-back queues 20 swings end to end, so only the last one ever reaches
+        // its impact point -- the first 19 are superseded while still pending and never land a hit. That queue is
+        // still the stress this test wants: each request's admission (cast validation, cost, cooldown, the previous
+        // swing's CancelCastAsync) takes CharacterService.Lock once, back-to-back, while the periodic ticks race for
+        // the same lock on their own timer. CastSkillRsp is sent the moment a request is admitted, independent of
+        // its swing's lead time, so waiting for it after every send is what actually proves the lock never got
+        // stuck; only the final, uncancelled swing is expected to land a real kill.
         foreach (var monster in monsters)
         {
-            var wait = bot.Inbox.WaitAsync(e => e.IsGame(CombatService.SkillHit)
-                && SkillHitInfo.Parser.ParseFrom(e.Body).Dsts.Any(d => d.DstID == monster.Uid && d.IsDead), TimeSpan.FromSeconds(20));
+            var ack = bot.Inbox.WaitAsync(e => e.IsGame(CombatService.UseSkill), TimeSpan.FromSeconds(10));
             await bot.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = 1000001, TargetId = monster.Uid });
-            sent.Add((monster.Uid, wait));
+            Assert.Equal(0, CastSkillRsp.Parser.ParseFrom((await ack).Body).Result);
             await Task.Delay(20); // close enough together to overlap, not so fast the client-side swing gate refuses them
         }
 
-        foreach (var (uid, wait) in sent)
-        {
-            var hit = await wait; // a timeout here is the repro: something is still holding the lock
-            Assert.True(monsters.Single(m => m.Uid == uid).Dead);
-        }
+        var lastMonster = monsters[^1];
+        var finalHit = bot.Inbox.WaitAsync(e => e.IsGame(CombatService.SkillHit)
+            && SkillHitInfo.Parser.ParseFrom(e.Body).Dsts.Any(d => d.DstID == lastMonster.Uid && d.IsDead), TimeSpan.FromSeconds(30));
+        await finalHit; // a timeout here is the repro: something is still holding the lock
     }
 }

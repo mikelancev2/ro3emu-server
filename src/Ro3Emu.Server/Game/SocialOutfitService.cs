@@ -43,7 +43,11 @@ public sealed class SocialOutfitService
     public SocialOutfitService(GameData data, RoleStore roles, CharacterService character, Deadlines deadlines, TimeProvider clock)
     {
         this._data = data; this._roles = roles; this._character = character; this._deadlines = deadlines; this._clock = clock;
-        character.JobChanged.Add(s => s.Synced.ContainsKey(Sync) ? SyncAsync(s) : Task.CompletedTask);
+        character.JobChanged.Add(async s =>
+        {
+            await FixStaleClassHeadAsync(s);
+            if (s.Synced.ContainsKey(Sync)) await SyncAsync(s);
+        });
         character.RegisterItemAction(UnlockAction, UseUnlockItemAsync);
     }
 
@@ -54,7 +58,30 @@ public sealed class SocialOutfitService
         var bytes = _roles.LoadSocialOutfit(s.Role!.Id);
         s.SocialOutfit = bytes is { Length: > 0 } ? DBSocialOutfit.Parser.ParseFrom(bytes) : new DBSocialOutfit();
         await PruneAsync(s);
+        await FixStaleClassHeadAsync(s);
         await SyncAsync(s);
+    }
+
+    /// <summary>
+    /// A worn head cosmetic (slot <see cref="Head"/>) saved for a past career (SocialOutfitConfig._iJobID) stayed worn
+    /// after a job change/evolution: <see cref="View"/> reapplied whatever was stored without checking it still matches
+    /// the current career, so party list portraits and target frames kept showing the old class's head (inferred: the
+    /// client has no code to notice this on its own, so the server's own stored choice must be corrected). Falls back to
+    /// the new career's own default head (<see cref="Build"/>), the same one a player who never wore one sees.
+    /// </summary>
+    private async Task FixStaleClassHeadAsync(GameSession s)
+    {
+        if (s.SocialOutfit == null || s.Role == null) return;
+        int career = s.Progress?.Career ?? s.Role.Career;
+        if (!s.SocialOutfit.SocialOutfitEquip.TryGetValue(Head, out var worn)
+            || _data.Row("SocialOutfitConfig", worn.CfgId) is not { } row) return;
+        long job = GameData.Int(row, "_iJobID");
+        if (job <= 0 || job == career) return;
+        var defaultHead = Build(_data, s.Role.Sex, career).SocialOutfitEquip.GetValueOrDefault(Head);
+        if (defaultHead == null) return;
+        var next = s.SocialOutfit.Clone();
+        next.SocialOutfitEquip[Head] = new DBSocialOutfitEquip { CfgId = defaultHead.CfgId };
+        await CommitAsync(s, next, "stale_class_head");
     }
 
     private Task SyncAsync(GameSession s)
@@ -77,8 +104,14 @@ public sealed class SocialOutfitService
                 into.SocialOutfitInfos[id] = owned.Clone();
             }
         foreach (var (type, equip) in stored?.SocialOutfitEquip ?? [])
+        {
+            // A stored head from a past career (FixStaleClassHeadAsync corrects it on login/job change, but a reader
+            // of someone else's profile sees the raw stored value in between): keep Build's current-career default.
+            if (type == Head && data.Row("SocialOutfitConfig", equip.CfgId) is { } row
+                && GameData.Int(row, "_iJobID") is var job && job > 0 && job != career) continue;
             if (info.SocialOutfitContainer.TryGetValue(type, out var container) && container.SocialOutfitInfos.ContainsKey(equip.CfgId))
                 info.SocialOutfitEquip[type] = new DBSocialOutfitEquip { CfgId = equip.CfgId };
+        }
         return info;
     }
 
