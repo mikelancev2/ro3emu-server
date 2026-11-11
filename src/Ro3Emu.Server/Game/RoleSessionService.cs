@@ -479,16 +479,29 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     /// The repair writes exactly ClientConfig.lua's PCInteractSetting.Nostalgic: EnableMouseMove true, EnableKeyboardMove
     /// false, SelectBtn/MoveBtn LC_DAL_Setting._processGameMode's (eSelectTargetKey/eMouseMoveKey - 1) = 0 (enum_PCMouseBtn
     /// Left), CameraMode its eCameraDragKey(2) != 1 branch = 0 (enum_PCCameraDragMode RightDrag). True when it repaired.
+    ///
+    /// Also migrates the one prior bug of our own: for about an hour on 2026-11-08, between cb7cacc6 and e94bdc23,
+    /// this same repair wrote the raw, un-adjusted Lua values (SelectBtn/MoveBtn 1, CameraMode 2) instead of the wire
+    /// values above -- a role saved in that window now has a real KeyBoardInfo with exactly that signature, which the
+    /// no-KeyBoardInfo gap above no longer reaches. A role with that exact triple gets the correct wire values written
+    /// over it; any other saved KeyBoardInfo, including a player's own mouse-off choice, is still left alone.
     /// </summary>
     internal static bool RepairClassicMovement(DBSettingInfo settings)
     {
-        const int oldSchool = 1, left = 0, rightDrag = 0;
+        const int oldSchool = 1, left = 0, rightDrag = 0, buggyRight = 1, buggyRightDrag = 2;
         if (!settings.ClientSetting.TryGetValue((int)SettingType.GameMode, out var modeBytes)) return false;
         GameModeSetting mode;
         try { mode = GameModeSetting.Parser.ParseFrom(modeBytes); }
         catch (InvalidProtocolBufferException) { return false; }
         if (mode.GameMode != oldSchool) return false;
-        if (settings.ClientSetting.ContainsKey((int)SettingType.KeyBoard)) return false;
+        KeyBoardInfo? keys = null;
+        if (settings.ClientSetting.TryGetValue((int)SettingType.KeyBoard, out var keyBytes))
+        {
+            try { keys = KeyBoardInfo.Parser.ParseFrom(keyBytes); }
+            catch (InvalidProtocolBufferException) { return false; }
+            bool isOurOldBug = keys.SelectBtn == buggyRight && keys.MoveBtn == buggyRight && keys.CameraMode == buggyRightDrag;
+            if (!isOurOldBug) return false;
+        }
         settings.ClientSetting[(int)SettingType.KeyBoard] = new KeyBoardInfo
         {
             KeyBoardMode = oldSchool, EnableMouseMove = true, EnableKeyboardMove = false,

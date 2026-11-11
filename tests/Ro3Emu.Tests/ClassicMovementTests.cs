@@ -46,6 +46,18 @@ public sealed class ClassicMovementTests
     }
 
     [Fact]
+    public void OurOwnOldBuggyWireValuesAreMigrated()
+    {
+        var s = Settings(1, new KeyBoardInfo { KeyBoardMode = 1, EnableMouseMove = true, SelectBtn = 1, MoveBtn = 1, CameraMode = 2 });
+        Assert.True(RoleSessionService.RepairClassicMovement(s));
+        var keys = Keys(s);
+        Assert.Equal(0, keys.SelectBtn);
+        Assert.Equal(0, keys.MoveBtn);
+        Assert.Equal(0, keys.CameraMode);
+        Assert.True(keys.EnableMouseMove);
+    }
+
+    [Fact]
     public void ModernModeOrNoGameModeIsLeftAlone()
     {
         Assert.False(RoleSessionService.RepairClassicMovement(Settings(2, new KeyBoardInfo { EnableKeyboardMove = true })));
