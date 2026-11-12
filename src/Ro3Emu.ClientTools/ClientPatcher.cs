@@ -34,7 +34,7 @@ public static class ClientPatcher
     /// </summary>
     private const string GmtManagerType = "GMT.GMTManager";
 
-    internal static readonly string[] PatchedFiles = ["Happyengine.Network.dll", "Assembly-CSharp.dll", "Phonest.Common.dll", "Happyengine.Base.Runtime.dll", "Unity.TextMeshPro.dll", "HUD.dll", "HappyEngine.Resource.dll", "UnityEngine.UI.dll", "UnityEngine.CoreModule.dll"];
+    internal static readonly string[] PatchedFiles = ["Happyengine.Network.dll", "Assembly-CSharp.dll", "Phonest.Common.dll", "Happyengine.Base.Runtime.dll", "Unity.TextMeshPro.dll", "HUD.dll", "HappyEngine.Resource.dll", "UnityEngine.UI.dll", "UnityEngine.CoreModule.dll", "RO3.ClientSecurity.dll"];
 
     /// <summary>--verbose: GS_Debug.ShowLog always true, so the Lua debug logs (Lua_Debug reads it) reach Player.log.</summary>
     public static bool VerboseLogs { get; set; }
@@ -87,14 +87,17 @@ public static class ClientPatcher
         if (!File.Exists(hooksDll)) throw new FileNotFoundException("build src/Ro3Emu.ClientHooks first", hooksDll);
         locDll ??= Embedded(LocFile, "Ro3Emu.Loc");
         if (!File.Exists(locDll)) throw new FileNotFoundException("build src/Ro3Emu.Loc first", locDll);
-        File.Copy(hooksDll, Path.Combine(managed, HooksFile), overwrite: true);
+        // CopyAtomically (write + rename over the target) rather than File.Copy(overwrite: true): a second client
+        // instance already has the previous HooksFile/LocFile mapped into memory, and an in-place overwrite of a
+        // mapped file is refused by Windows (ERROR_USER_MAPPED_FILE), while a rename over it is not.
+        CopyAtomically(hooksDll, Path.Combine(managed, HooksFile));
         Console.WriteLine($"installed {HooksFile}");
         if (purchaseUrl != null)
         {
             OpenUrlPatch.SetPurchaseUrl(Path.Combine(managed, HooksFile), purchaseUrl);
             Console.WriteLine($"purchase links go to {purchaseUrl}");
         }
-        File.Copy(locDll, Path.Combine(managed, LocFile), overwrite: true);
+        CopyAtomically(locDll, Path.Combine(managed, LocFile));
         Console.WriteLine($"installed {LocFile}");
 
         ReplaceManaged(clientDir, (file, source, destination) =>
@@ -121,8 +124,27 @@ public static class ClientPatcher
         "HappyEngine.Resource.dll" => m => TextSink.PatchLauncher(m, locDll),
         "UnityEngine.UI.dll" => m => ImageSwapPatch.Patch(m, hooksDll),
         "UnityEngine.CoreModule.dll" => m => OpenUrlPatch.Patch(m, hooksDll),
+        "RO3.ClientSecurity.dll" => DisableSingleInstanceGuard,
         _ => null,
     };
+
+    /// <summary>
+    /// SingleInstanceGuard.Enforce() checks a named mutex ("Global\RO3.GameClient.SingleInstance.v1", a security
+    /// descriptor that reaches across Windows sessions) and kills the process with "RO3 is already running / Only
+    /// one RO3 client can run on this computer at a time (NA or Asia)" if one is already held. That split does not
+    /// exist on a private server; the check only stops a player from running two clients at once (inferred).
+    /// </summary>
+    private static string DisableSingleInstanceGuard(ModuleDefinition module)
+    {
+        var guard = module.GetType("RO3.ClientSecurity.SingleInstanceGuard") ?? throw new InvalidOperationException("SingleInstanceGuard not found");
+        var enforce = guard.Methods.Single(m => m.Name == "Enforce" && m.Parameters.Count == 0);
+        enforce.Body.Instructions.Clear();
+        enforce.Body.ExceptionHandlers.Clear();
+        enforce.Body.Variables.Clear();
+        var il = enforce.Body.GetILProcessor();
+        il.Append(il.Create(OpCodes.Ret));
+        return "SingleInstanceGuard.Enforce -> no-op";
+    }
 
     /// <summary>
     /// Brings every patched DLL from its pristine backup to its new Managed copy without ever losing an original:
@@ -337,6 +359,7 @@ public static class ClientPatcher
                 catch (InvalidOperationException e) { problems.Add(e.Message); }
             }
             if (file == "Unity.TextMeshPro.dll" && assembly.MainModule.GetType("TMPro.TMP_Text") == null) problems.Add("TMPro.TMP_Text not found");
+            if (file == "RO3.ClientSecurity.dll" && assembly.MainModule.GetType("RO3.ClientSecurity.SingleInstanceGuard") == null) problems.Add("SingleInstanceGuard not found");
             if (file == "UnityEngine.CoreModule.dll")
             {
                 // In memory only: does the purchase link redirect (and its call into the hooks DLL) fit this build.
