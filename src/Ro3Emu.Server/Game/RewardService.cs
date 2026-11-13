@@ -29,6 +29,7 @@ public sealed class RewardService
     private readonly DropAttenuation _attenuation;
     private readonly FieldExpRule[] _configuredFieldExp; // Ro3Emu:FieldExpRates (inferred), empty unless an operator set it
     private volatile FieldExpRule[] _fieldExp; // the rules in force: the configured ones until a GM changes them
+    private readonly double _expRate; // Ro3Emu:ExpRate (inferred), 1.0 unless an operator set it
 
     /// <summary>Field AFK selects the enhanced _iDrop table only for qualified ordinary field kills.
     /// Other kills use environment 0, preserving ordinary rewards (localization 10960000077; mapping inferred).</summary>
@@ -45,6 +46,7 @@ public sealed class RewardService
         Microsoft.Extensions.Options.IOptions<ServerOptions>? options = null)
     {
         _fieldExp = _configuredFieldExp = FieldExpRates.Valid(options?.Value);
+        _expRate = Rate(options?.Value.ExpRate);
         this._character = character;
         this._teams = teams;
         this._data = data;
@@ -164,6 +166,7 @@ public sealed class RewardService
             baseExp = baseExp * Correction((int)Math.Clamp(gap, -200, 200)) / 10000;
             baseExp = Math.Max(1, baseExp * _teams.ExpBonus(player) / 10000);
             baseExp = ScaleFieldExp(monster.Template.NpcId, player.Progress!.Level, baseExp);
+            baseExp = Math.Max(1, (long)Math.Round(baseExp * _expRate));
         }
         // BaseExpAddConfig catch-up below the server level (CharacterService.LevelRules).
         baseExp = _character.WithPursueBonus(player.Progress!.Level, baseExp);
@@ -176,6 +179,9 @@ public sealed class RewardService
         var rules = _fieldExp;
         return rules.Length > 0 && NPCConfig.Get(_data, npcId)?.WildMonsters == 1 ? FieldExpRates.Scale(rules, level, exp) : exp;
     }
+
+    /// <summary>The configured Ro3Emu:ExpRate, 1.0 when unset or out of the 0.1-10 range an operator can use.</summary>
+    private static double Rate(double? configured) => configured is >= 0.1 and <= 10 ? configured.Value : 1.0;
 
     /// <summary>Tests: the drop rolls follow this seed, so two kills of one monster roll the same.</summary>
     internal void SeedRollsForTest(int seed) => _random = new Random(seed);

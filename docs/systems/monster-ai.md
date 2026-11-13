@@ -95,6 +95,23 @@ A drop row with a `DropGroupConfig._iQuestLimit` is a quest drop: it is a candid
 and not delivered (**inferred**), e.g. the Egg Thief wave's Card: Poring (group 144, quest 10102100); award and AFK rolls never
 give it (`RewardService.PickFromGroup`).
 
+## Server EXP rate (`Ro3Emu:ExpRate`)
+
+A server-wide multiplier on every kill's Base EXP (and the Job EXP derived from it), applied after `FieldExpRates` and the
+level-gap correction: 2.0 doubles levelling everywhere, not only the open field. 1.0 by default, the client's own rate
+(**inferred**: the original had no such knob). A value outside 0.1 to 10 is ignored and the rate stays 1.0.
+
+```json
+{
+  "Ro3Emu": {
+    "ExpRate": 2.0
+  }
+}
+```
+
+`Ro3Emu__ExpRate=2.0` sets it through the environment. Unlike `FieldExpRates`, it takes effect only at the next start; there
+is no GM command for it.
+
 ## Field EXP rates (`Ro3Emu:FieldExpRates`)
 
 A kill pays what the client's drop tables say: the monster's `_iDrop` and `_iNormalDrop` chains give item 100 (Base EXP), scaled

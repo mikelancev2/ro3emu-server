@@ -265,6 +265,13 @@ public sealed class ServerOptions
     public List<FieldExpRule> FieldExpRates { get; set; } = [];
 
     /// <summary>
+    /// Server-wide multiplier (Ro3Emu:ExpRate) on every Base EXP a kill pays, before <see cref="FieldExpRates"/>; the Job
+    /// EXP that is derived from it scales the same way. 1.0 by default, the client's own rate. (inferred: an operator's
+    /// knob, not original behavior.)
+    /// </summary>
+    public double ExpRate { get; set; } = 1.0;
+
+    /// <summary>
     /// (inferred) Star Cores drop for roles with the Astral Level open (ParagonService.StarCoreDrops). The client data gives
     /// them no source; false turns the reconstructed drop off.
     /// </summary>
