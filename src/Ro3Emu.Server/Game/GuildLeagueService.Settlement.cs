@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Text.Json;
 using Google.Protobuf;
 using Romsg;
-using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data;
 using Ro3Emu.Server.Economy;
 
@@ -231,8 +230,8 @@ public sealed partial class GuildLeagueService
     /// <summary>
     /// After the finals: places 8 - score; per group the places 1.._iGroupUpNum move up a tier and the last _iGroupDownNum
     /// of the eight places move down (GuildLeagueBracket.Lift), shown as rankLift. Group
-    /// winners of the tiers with _iGuildIconID get mail 1039 (10140100044: the Honor Emblem is unlocked) and the emblem
-    /// is added to the guild's icon choices, the same way a 113 UnlockGuildBadge item does it (GuildService.ItemActions).
+    /// winners of the tiers with _iGuildIconID get mail 1039 (10140100044: the Honor Emblem is unlocked; adding the
+    /// emblem to the guild's icon choices is not implemented).
     /// </summary>
     private async Task SettleCupAsync()
     {
@@ -240,7 +239,6 @@ public sealed partial class GuildLeagueService
         var cup = next.Cup!;
         var tiers = Tiers;
         var letters = new List<(long Leader, string Tier, int Place)>();
-        var unlocks = new List<(GuildStore.State Guild, long[] Icons)>();
         foreach (var group in cup.Groups)
         {
             var scores = Scores(group);
@@ -262,15 +260,7 @@ public sealed partial class GuildLeagueService
             if (real.Count > 0 && rank is { } row && row.TryGetProperty("_iGuildIconID", out var icons)
                 && icons.ValueKind == JsonValueKind.Array && icons.GetArrayLength() > 0
                 && _guilds.Get(real[0]) is { } winner && winner.Members.Values.FirstOrDefault(m => m.Official == 1) is { } leader)
-            {
                 letters.Add((leader.RoleId, _data.TextOf(row, "_iName"), 1));
-                var fresh = icons.EnumerateArray().Select(i => i.GetInt64()).Where(i => !winner.UnlockedHeadIcons.ContainsKey(i)).ToArray();
-                if (fresh.Length > 0)
-                {
-                    foreach (long icon in fresh) winner.UnlockedHeadIcons[icon] = 0;
-                    unlocks.Add((winner, fresh));
-                }
-            }
         }
         cup.Settled = true;
         int template = (int)Setting("GuildLeagueGuildIconNoticeMailID", 1039);
@@ -279,18 +269,10 @@ public sealed partial class GuildLeagueService
             {
                 foreach (var (leader, tier, place) in letters)
                     _mail.QueueTemplateLocked(leader, $"guild-league:{cup.Index}:honor:{leader}", template, [], tx, tier, place);
-                foreach (var (guild, _) in unlocks)
-                    _guilds.EnlistSave(guild, tx, "guild disappeared during league icon unlock");
             });
         foreach (var (leader, _, _) in letters)
             try { await _mail.NotifyRecipientAsync(leader); }
             catch (Exception e) { _log.LogWarning(e, "Guild League honor mail notice deferred for {Role}", leader); }
-        foreach (var (guild, _) in unlocks)
-        {
-            var change = new GuildBaseInfoChangeNtf { Tp = GuildBaseInfoChangeNtf.Types.ChangeType.ChangeUnLockHeadIcon };
-            change.UnLockHeadIconData.AddRange(GuildService.UnlockedIcons(guild));
-            await _guildService.PushBase(guild, change);
-        }
         _log.LogInformation("Guild League tournament {Index} settled", cup.Index);
     }
 }
