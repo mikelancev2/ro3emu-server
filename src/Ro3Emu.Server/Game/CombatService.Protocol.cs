@@ -348,9 +348,6 @@ public sealed partial class CombatService
     /// automatic one of Focused Arrow Strike (13317's logic data) both cast.</summary>
     private const string WargStrikeLogic = "WugStrike_";
 
-    /// <summary>A hit's showPoint, the same on the monster and the player paths: Warg Strike's own effect, else HitEffect's pick.</summary>
-    private int HitShowPoint(JsonElement row) => WargStrikeHigh(row) ? WargHitEffect : HitEffect(GameData.Int(row, "_iScriptShow"));
-
     /// <summary>
     /// The wolf's effects, from a capture of the Genesis server for a manual Warg Strike (1331203): no client table names
     /// them (show 13316's m_kShows is only [[1331601, 1]]). 1331605 is the 31108 bullet of the charge, 1331602 its 31109
