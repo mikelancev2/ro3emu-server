@@ -332,6 +332,9 @@ public sealed partial class CombatService
     /// <summary>Warg Strike (show 13316) is cast and shown on the HIGH_LEVEL routes (31106/31108/31109), as the Genesis server does.</summary>
     internal static bool WargStrikeHigh(JsonElement row) => SkillShow.ScriptShowId(row) == WargStrikeShow;
 
+    /// <summary>A hit's showPoint, the same on the monster and the player paths: Warg Strike's own effect, else HitEffect's pick.</summary>
+    private int HitShowPoint(JsonElement row) => WargStrikeHigh(row) ? WargHitEffect : HitEffect(GameData.Int(row, "_iScriptShow"));
+
     /// <summary>
     /// The wolf's charge: seen on the Genesis server for a manual Warg Strike (1331203), 334 ms after the cast timeline and
     /// about 190 ms before the hit: a 31108 bullet (effect 1331605, 158 ms) and a 31109 effect display (1331602, effectType 5,
