@@ -29,6 +29,8 @@ public sealed class ActiveSkillCast
     public required int ActionMs { get; init; }
     public bool Cancelled { get; set; }
     public bool Resolved { get; set; }
+    /// <summary>The skills of the requests refused while this cast ran: the client waits on each until its reply.</summary>
+    internal HashSet<int> RefusedRequests { get; } = [];
     public SkillObject? Operator { get; init; }
     /// <summary>Extra effects remain bound to their equipped source after asynchronous publication.</summary>
     internal Func<bool>? SourceEligible { get; init; }
@@ -284,6 +286,7 @@ public sealed partial class CombatService
     {
         var reply = new CastSkillRsp { Result = error, IsAutoCast = req.IsAutoCast };
         if (parameter != 0) reply.Params.Add(parameter);
+        if (s.SkillCast is { Cancelled: false } running) running.RefusedRequests.Add(req.SkillId);
         await s.SendGameAsync(UseSkill, reply);
         if (s.SkillCast is not { Cancelled: false })
         {
@@ -796,6 +799,11 @@ public sealed partial class CombatService
             else await CastAsync(s, nextSwing);
             return;
         }
+        if (DropsWaitingRequest(s, req))
+        {
+            await s.SendGameAsync(SkillInterrupt, new SkillInterruptResp { IsInterruptSucc = false });
+            return;
+        }
         bool valid = req == null || req.InterruptSkillId == 0 || req.InterruptSkillId == s.SkillCast?.Request.SkillId
             || req.InterruptSkillId == s.Attack?.SkillId || _eventAttacks.TryGetValue(s, out var eventAttack) && req.InterruptSkillId == eventAttack.SkillId;
         bool interrupted = valid && (s.SkillCast != null || s.Attack != null || _eventAttacks.ContainsKey(s));
@@ -807,6 +815,28 @@ public sealed partial class CombatService
         }
         await s.SendGameAsync(SkillInterrupt, new SkillInterruptResp { IsInterruptSucc = interrupted });
         if (interrupted && req?.NxtSkill is { } next) await CastAsync(s, next);
+    }
+
+    /// <summary>
+    /// A 31124 without a next skill that only drops the request the client still waits on. The client keeps a pressed skill
+    /// as its "cache" from the 31102 it sends until the reply (LC_Skill_Function.SendSkill sets SetLocalSkillCacheInfo,
+    /// LC_Scene_Sync._useSkillReq clears it), and drops it with such a 31124: on letting go of the key
+    /// (UI_Sys_Main_JoyStickSkillWidgetBaseCtrl.CancelInputSkill: interruptSkillId is that skill) or on a move during a skill
+    /// that blocks moving (LC_UnitChecker.CheckClearCacheSkill: interruptSkillId 0). The running skill is no part of it: the
+    /// client lets a skill be cut only as LC_Skill_RunTimeContext.GetSkillCanInterrupted allows, and a held Turn Undead
+    /// (_iInterruptedType 2) cannot be cut before its m_fInterruptTime. So while the running cast cannot yield to the
+    /// skill named and a request for it was refused during the cast, the cast goes on: cutting it lost every hit of a Turn
+    /// Undead pressed again and again. This server queues no request, so there is nothing else to drop (inferred).
+    /// A swing is left out: the attack loop stops on a 31124.
+    /// </summary>
+    private bool DropsWaitingRequest(GameSession s, SkillInterruptReq? req)
+    {
+        if (req is not { NxtSkill: null } || s.SkillCast is not { Cancelled: false } running) return false;
+        var skill = new SkillConfig(running.Row);
+        if (skill.IsNormalAttack(_data)) return false;
+        bool waited = req.InterruptSkillId == 0 ? running.RefusedRequests.Count > 0 : running.RefusedRequests.Contains(req.InterruptSkillId);
+        return waited && !CastYields(skill.InterruptedType, req.InterruptSkillId == running.Request.SkillId, Now - running.StartMs,
+            SkillShow.InterruptOffset(_data.SkillTemplate(skill.ScriptShow), running.ChantMs, running.ActionMs));
     }
 
     /// <summary>
