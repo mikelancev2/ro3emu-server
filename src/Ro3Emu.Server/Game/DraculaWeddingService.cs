@@ -71,7 +71,7 @@ public sealed class DraculaWeddingService : IGameTicker
         this._data = data; this._home = home; this._dungeons = dungeons; this._catalog = catalog; this._schedule = schedule;
         this._functions = functions; this._tasks = tasks; this._buffs = buffs; this._mail = mail; this._sessions = sessions;
         this._clock = clock; this._loop = loop; this._log = log;
-        scene.Loaded.Add(LoadedAsync);
+        scene.Loaded.Subscribe(LoadedAsync);
         gm.Register("dracula", "open|close (test aid: Wedding Crashers opens now for 30 minutes, or closes)", TestWindowAsync);
     }
 
@@ -152,8 +152,8 @@ public sealed class DraculaWeddingService : IGameTicker
     };
 
     /// <summary>PublicParamConfig.DraculaWeddingDynamicStoryIdArr {3001, 3003, 3004}: home, lair start, rescue.</summary>
-    private long StoryId(int index) => _data.Table("PublicParamConfig").TryGetValue("DraculaWeddingDynamicStoryIdArr", out var ids)
-        && ids.ValueKind == JsonValueKind.Array && ids.GetArrayLength() > index ? (long)(GameData.Number(ids[index]) ?? 0) : 0;
+    private long StoryId(int index) =>
+        Data.Config.PublicParams.Of(_data).DraculaWeddingDynamicStoryIdArr is { } ids && index < ids.Length ? ids[index] : 0;
 
     private async Task SendQuietAsync(GameSession s, uint id, Google.Protobuf.IMessage msg)
     {

@@ -12,7 +12,7 @@ namespace Ro3Emu.Server.Game;
 /// 83220 pays RefiningSeasonTable._kDeplete and rolls _kAttrsId, 83221 activates one offered group,
 /// and 83222 discards the offer. The group effects come from RefiningSeasonAttrConfig._kAttrs.
 /// </summary>
-public sealed class SeasonRefineService
+public sealed partial class SeasonRefineService
 {
     public const uint SeasonRefineSync = 5023, Recast = 83220, SelectAttr = 83221, GiveUp = 83222;
 
@@ -25,12 +25,12 @@ public sealed class SeasonRefineService
     public SeasonRefineService(GameData data, CharacterService character, RoleStore roles, EquipmentService equipment,
         ILogger<SeasonRefineService> log)
     {
-        equipment.Refined.Add(OnRefinedAsync);
+        equipment.Refined.Subscribe(OnRefinedAsync);
         this._data = data;
         this._character = character;
         this._roles = roles;
         this._log = log;
-        character.ExtraAttributes.Add(ActiveAttributes);
+        character.ExtraAttributes.Subscribe(ActiveAttributes);
     }
 
     /// <summary>Load before the first character stat snapshot; the active groups are part of that snapshot.</summary>
@@ -148,9 +148,15 @@ public sealed class SeasonRefineService
             foreach (int group in offered) slot.CanSelectedAttr[group] = 0;
             var economy = _character.ProgressionEconomy(session, "cd13c/season-refine-recast", cost!, [],
                 new { req.EquipType, req.RefineId, Offers = offered.ToArray() });
-            var paid = await _character.ExchangeLockedAsync(session, cost!, [], popup: false, sync: false,
-                persist: tx => { tx.RoleBlob(session.Role!.Id, "season_refine", next.ToByteArray()); tx.WithEconomy(economy); },
-                committed: () => session.SeasonRefine = next, asyncCommit: true);
+            var paid = await _character.ExchangeLockedAsync(session, new ExchangeRequest
+            {
+                Cost = cost!,
+                Popup = false,
+                Sync = false,
+                Persist = tx => { tx.RoleBlob(session.Role!.Id, "season_refine", next.ToByteArray()); tx.WithEconomy(economy); },
+                Committed = () => session.SeasonRefine = next,
+                AsyncCommit = true,
+            });
             if (paid == null) result = _character.ShortageOf(session, cost!); // (inferred) ordinary item/currency shortage codes.
             else
             {
@@ -275,10 +281,34 @@ public sealed class SeasonRefineService
 
     /// <summary>Only selected, unlocked groups contribute; pending choices never affect combat stats.</summary>
     public IEnumerable<(long Id, double Value)> ActiveAttributes(GameSession session) =>
-        ActiveGroups(session).SelectMany(group => GameData.Pairs(group, "_kAttrs"));
+        ActiveEntries(session).SelectMany(e => GroupAttributes(e.GroupId, e.Group));
+
+    /// <summary>
+    /// Attributes of one RefiningSeasonAttrConfig row. The shipped client table swaps PATK/MATK (103/104) and
+    /// PDEF/MDEF (105/106) on groups 2 ("Basic Defense") and 12 ("Advanced Attack"); both the server and
+    /// Ro3Emu.ClientHooks.SeasonRefineAttrs correct those two rows so UI and stats agree.
+    /// </summary>
+    internal static IEnumerable<(long Id, double Value)> GroupAttributes(long groupId, JsonElement group)
+    {
+        foreach (var (id, value) in GameData.Pairs(group, "_kAttrs"))
+        {
+            long fixedId = (groupId, id) switch
+            {
+                (2, 103) => 105,
+                (2, 104) => 106,
+                (12, 105) => 103,
+                (12, 106) => 104,
+                _ => id,
+            };
+            yield return (fixedId, value);
+        }
+    }
 
     /// <summary>The RefiningSeasonAttrConfig rows of the selected, unlocked groups (stats and PowerService).</summary>
-    internal IEnumerable<JsonElement> ActiveGroups(GameSession session)
+    internal IEnumerable<JsonElement> ActiveGroups(GameSession session) =>
+        ActiveEntries(session).Select(e => e.Group);
+
+    private IEnumerable<(int GroupId, JsonElement Group)> ActiveEntries(GameSession session)
     {
         if (session.SeasonState?.PlayBookId != 101 || session.SeasonRefine == null) yield break;
         foreach (var (part, equip) in session.SeasonRefine.EquipParts)
@@ -288,7 +318,7 @@ public sealed class SeasonRefineService
                 if (slot.ActiveAttr <= 0 || error != 0 || row is not { } configured
                     || !GameData.Pairs(configured, "_kAttrsId").Any(p => p.Id == slot.ActiveAttr)
                     || _data.Row("RefiningSeasonAttrConfig", slot.ActiveAttr) is not { } group) continue;
-                yield return group;
+                yield return (slot.ActiveAttr, group);
             }
     }
 }

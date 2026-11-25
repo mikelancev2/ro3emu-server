@@ -28,7 +28,7 @@ public sealed class SeasonRefineTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
             o.GameGatePort = gamePort;
@@ -41,7 +41,6 @@ public sealed class SeasonRefineTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -143,7 +142,7 @@ public sealed class SeasonRefineTests : IAsyncLifetime
             Assert.Equal(ErrorCodes.ItemsShort, (await Next(alice, SeasonRefineService.Recast, SeasonRefineRecastResp.Parser)).Result);
             await Gm("alice", "!item 1200000 4");
             await Gm("alice", "!item 2 32000");
-            var catalog = EconomyCatalog.Load(Path.Combine(RepoRoot(), "data"));
+            var catalog = EconomyCatalog.Load(Path.Combine(ClientData.RepoRoot, "data"));
             var beforeRecast = S3EconomyReader.Read(_dataDir, catalog);
             var (recastResult, candidates, offer) = await RecastOffer(alice, freeOffer); // replaces the free offer
             Assert.Equal(3, candidates.Length);
@@ -269,9 +268,9 @@ public sealed class SeasonRefineTests : IAsyncLifetime
             m => !m.SyncAllMark && m.EquipParts.TryGetValue(1, out var part) && part.Inc.RefineSlots.TryGetValue(1, out var slot)
                 && slot.Inc.CanSelectedAttr.Count == 3);
         int groupId = pending.EquipParts[1].Inc.RefineSlots[1].Inc.CanSelectedAttr.Keys.First();
-        using var groups = JsonDocument.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "data", "config", "RefiningSeasonAttrConfig.json")));
-        var effects = groups.RootElement.GetProperty(groupId.ToString()).GetProperty("_kAttrs").EnumerateArray()
-            .Select(e => (Property: e[0].GetInt32(), Bonus: e[1].GetInt32())).ToArray();
+        using var groups = JsonDocument.Parse(File.ReadAllText(Path.Combine(ClientData.RepoRoot, "data", "config", "RefiningSeasonAttrConfig.json")));
+        var effects = SeasonRefineService.GroupAttributes(groupId, groups.RootElement.GetProperty(groupId.ToString()))
+            .Select(e => (Property: (int)e.Id, Bonus: (int)e.Value)).ToArray();
         await alice.SendGameAsync(SeasonRefineService.SelectAttr,
             new SeasonRefineSelectAttrReq { EquipType = 1, RefineId = 1, GroupId = groupId });
         var after = await Next(alice, CharacterService.OnePropertyChange, OnePropertyChange.Parser,
@@ -370,11 +369,28 @@ public sealed class SeasonRefineTests : IAsyncLifetime
         Assert.Equal(0, (await Next(relog, SeasonRefineService.SelectAttr, SeasonRefineSelectAttrResp.Parser)).Result);
     }
 
-    private static string RepoRoot()
+    [Fact]
+    public void BasicDefenseGivesDefAndAdvancedAttackGivesAtk()
     {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) return dir.FullName;
-        throw new DirectoryNotFoundException("repository root");
+        static (long Id, double Value)[] Parse(long groupId, string json)
+        {
+            using var doc = JsonDocument.Parse(json);
+            return [.. SeasonRefineService.GroupAttributes(groupId, doc.RootElement)];
+        }
+
+        // Row 1 ("Basic Attack") and row 13 ("Ultimate Defense") stay unchanged.
+        Assert.Equal([(103L, 10.0), (104L, 10.0)],
+            Parse(1, """{"_kAttrs":[[103,10],[104,10]]}"""));
+        Assert.Equal([(105L, 150.0), (106L, 150.0)],
+            Parse(13, """{"_kAttrs":[[105,150],[106,150]]}"""));
+
+        // Row 2 ("Basic Defense") had 103/104 in client data -> remapped to 105/106 (PDEF/MDEF).
+        Assert.Equal([(105L, 20.0), (106L, 20.0)],
+            Parse(2, """{"_kAttrs":[[103,20],[104,20]]}"""));
+
+        // Row 12 ("Advanced Attack") had 105/106 in client data -> remapped to 103/104 (PATK/MATK).
+        Assert.Equal([(103L, 80.0), (104L, 80.0)],
+            Parse(12, """{"_kAttrs":[[105,80],[106,80]]}"""));
     }
 
 }

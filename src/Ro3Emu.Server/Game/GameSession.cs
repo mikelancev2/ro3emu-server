@@ -12,8 +12,13 @@ namespace Ro3Emu.Server.Game;
 /// named RPCs (methodName + msgpack values concatenated without an array header) or raw game messages
 /// (no methodName, parameters = uint32 LE msgId ‖ romsg protobuf).
 /// </summary>
-public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
+public sealed class GameSession(PhonestChannel channel, TrafficLog traffic, TimeProvider? clock = null)
 {
+    internal TimeProvider Clock { get; } = clock ?? TimeProvider.System;
+    internal long NowMs => Clock.GetUtcNow().ToUnixTimeMilliseconds();
+    internal long NowSec => Clock.GetUtcNow().ToUnixTimeSeconds();
+    internal DateTime UtcNow => Clock.GetUtcNow().UtcDateTime;
+
     /// <summary>The current game transport. A silent reconnect (ReconnectService) swaps it on the loop; frames and
     /// closes of a swapped-out channel are ignored by the gate.</summary>
     public PhonestChannel Channel { get; internal set; } = channel;
@@ -52,7 +57,19 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     internal long AccountGeneration { get; set; }
     internal Task PredecessorFence { get; set; } = Task.CompletedTask;
 
-    public Role? Role { get; set; }
+    private Role? _role;
+    internal SessionRegistry? Registry { get; set; }
+    public Role? Role
+    {
+        get => _role;
+        set
+        {
+            long oldId = _role?.Id ?? 0;
+            _role = value;
+            long newId = value?.Id ?? 0;
+            if (oldId != newId) Registry?.RoleBound(this, oldId, newId);
+        }
+    }
     public Ownership.OwnerRegistry? Owners { get; internal set; }
     public Ownership.RoleOwner? Owner { get; internal set; }
     public Ownership.AttachmentLease? Attachment { get; internal set; }
@@ -70,6 +87,7 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
         Achievements = null; AchievementRuntime = null; AdventureGroupRole = null;
         Library = null; CardLibraryReadyAttachment = null; GrowthClass = null;
         NewActivities = null; ActivitiesReady = false;
+        VisibleConches.Clear(); PlayingPillar = null; PendingConch = 0; ConchStartPosition = null;
         Dungeons = null; DungeonAttempt = null;
         Tower = null; TowerAttempt = null;
         Training = null; EventFaction = 0;
@@ -191,6 +209,10 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>GM override added to the speed attribute (113), not saved (!speed).</summary>
     public long SpeedBonus { get; set; }
 
+    /// <summary>CharacterService.Stats' memo and the loop work item a combat path allowed it in (see there).</summary>
+    internal object? StatsMemo { get; set; }
+    internal long StatsReuseSerial { get; set; } = -1;
+
     /// <summary>GM panel combat switches (GmNoCD, GmDamageFix, GmUnlimit), not saved; combat reads the field per cast or hit.</summary>
     public GmCombatSwitches GmCombat { get; set; }
     /// <summary>GM panel attribute changes (GmSetEntityAttr / GmChangeEntityAttr) as raw contributions, not saved.</summary>
@@ -208,8 +230,16 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     internal WalkAllowance WalkAllowance { get; } = new();
     /// <summary>A swing a move cancelled holds the next normal attack until this time (CombatService.CancelCastAsync).</summary>
     internal long SwingLockUntilMs { get; set; }
-    /// <summary>Until when a skill's 31112 moves this player (RoleSessionService.WalkAsync drops the client's walks meanwhile).</summary>
-    internal long SkillMovedUntilMs { get; set; }
+    /// <summary>The last move a skill's 31112 carried this player on (RoleSessionService.WalkAsync drops the walks that predate it).</summary>
+    internal SkillCarry? Carry { get; private set; }
+
+    /// <summary>A 31112 carries this player from <paramref name="start"/> to <paramref name="end"/> in <paramref name="moveMs"/>: the server is at the end at once.</summary>
+    internal void CarryBySkill(Romsg.Vec3 start, Romsg.Vec3 end, long nowMs, int moveMs)
+    {
+        PreviousPosition = start.Clone();
+        Position = end.Clone();
+        Carry = new SkillCarry(start.Clone(), end.Clone(), nowMs, nowMs + Math.Max(1, moveMs));
+    }
 
     /// <summary>The game message budgets of this connection (GameMessageHandler.WithinRate).</summary>
     internal SessionRates? MessageRates { get; set; }
@@ -240,7 +270,7 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
         get => TaskRuntime.InCutScene;
         set
         {
-            if (value && !TaskRuntime.InCutScene) CutSceneSinceMs = MonsterService.NowMs;
+            if (value && !TaskRuntime.InCutScene) CutSceneSinceMs = NowMs;
             TaskRuntime.InCutScene = value;
         }
     }
@@ -274,6 +304,11 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     public Romsg.DBNewActivityInfo? NewActivities { get; set; }
     public ActivityRuntimeState ActivityRuntime { get; set; } = new();
     public SemaphoreSlim ActivityGate { get; } = new(1, 1);
+    internal HashSet<long> VisibleConches { get; } = [];
+    internal NewActivityService.PillarAttempt? PlayingPillar { get; set; }
+    internal long ConchCycle { get; set; }
+    internal long PendingConch { get; set; }
+    internal Romsg.Vec3? ConchStartPosition { get; set; }
     public bool ActivitiesReady { get; set; }
     /// <summary>The client has the pass challenge rows (Ro3Emu.ClientHooks.PassChallenges sent 77014): 5027 may carry them.</summary>
     public bool PassChallengeRows { get; set; }
@@ -509,6 +544,8 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
 
     /// <summary>The last version of each AUTO_SYNC dataset the client got (msg id -> DB object), for AutoSync increments.</summary>
     public Dictionary<uint, Google.Protobuf.IMessage> Synced { get; } = [];
+    /// <summary>The serialized last-sent copy of the large datasets CharacterService keeps packed (see there).</summary>
+    internal Dictionary<uint, byte[]> SyncedPacked { get; } = [];
 
     /// <summary>Items still marked new in the bag (guidToNew, the red dot).</summary>
     public HashSet<long> NewItems { get; } = [];

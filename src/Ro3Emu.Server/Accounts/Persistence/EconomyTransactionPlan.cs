@@ -280,7 +280,7 @@ internal sealed class EconomyTransactionPlan(RoleItemPlan child, EconomyMutation
             ? true // The ordered typed grammar below validates the optional kill/card/AFK children.
             : actualColumns.SequenceEqual(requiredColumns.Concat(cardColumns));
         string[] allowedColumns = mutation.CommandKind == "monster-kill"
-            ? ["library", "task_followup", "tower", "tasks", "wild_afk", "area_concur"]
+            ? ["library", "task_followup", "tower", "tasks", "wild_afk", "area_concur", "life_restrict"]
             : mutation.CommandKind is "gather-yield" or "dungeon-reward"
                 ? [.. requiredColumns, "library", "task_followup"] : requiredColumns;
         var activation = extra.OfType<DungeonObligationActivatePlan>().SingleOrDefault();
@@ -293,9 +293,12 @@ internal sealed class EconomyTransactionPlan(RoleItemPlan child, EconomyMutation
                 index++;
                 if (index >= ordinaryExtra.Length || ordinaryExtra[index++] is not TowerFirstPassWritePlan) return false;
             }
-            if (index < ordinaryExtra.Length && ordinaryExtra[index] is RoleBlobWritePlan { Column: "wild_afk" }) index++;
+            bool fieldKill = index < ordinaryExtra.Length && ordinaryExtra[index] is RoleBlobWritePlan { Column: "wild_afk" };
+            if (fieldKill) index++;
             // Monster Hunt kill counters (MonsterHuntService), staged after the AFK child.
             if (index < ordinaryExtra.Length && ordinaryExtra[index] is RoleBlobWritePlan { Column: "area_concur" }) index++;
+            // A Lost Note spends a daily gathering restriction in the same field-kill receipt.
+            if (fieldKill && index < ordinaryExtra.Length && ordinaryExtra[index] is RoleBlobWritePlan { Column: "life_restrict" }) index++;
             if (index < ordinaryExtra.Length && ordinaryExtra[index] is RoleBlobWritePlan { Column: "library" })
             {
                 index++;
@@ -551,6 +554,9 @@ internal sealed class EconomyTransactionPlan(RoleItemPlan child, EconomyMutation
 
     internal static object?[] DecodeChildReceipts(byte[] payload)
     {
+        // ReceiptRetention dropped them: the operation committed before the retention window and is not answered again.
+        if (ReceiptBlobs.IsCompacted(payload))
+            throw new EconomyOperationConflictException("The operation committed before the receipt retention window; its results are no longer kept.");
         using var stream = new MemoryStream(payload, writable: false);
         using var reader = new BinaryReader(stream, Encoding.UTF8);
         int count = reader.ReadInt32();

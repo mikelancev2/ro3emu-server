@@ -11,9 +11,10 @@ namespace Ro3Emu.Server.Game;
 /// 4004 quest delivered (TaskService.IsDelivered), 1014 cleared Spirit Tower floor, 11001 active life skill, 1102 learned skill. Resent when the level or
 /// job changes, so functions unlock as the player grows.
 /// </summary>
-public sealed class FunctionService
+public sealed partial class FunctionService
 {
     public const uint FunctionOpenSync = 5056;
+    public const int SkillFunction = 10, SeasonTalentFunction = 1003; // FunctionConfig: skills and season talents
 
     private const int CondBaseLevel = 1002, CondTowerFloor = 1014, CondJobRank = 1019, CondRoleHasTask = 1101,
         CondLearnedSkill = 1102, CondServerStage = 3031, CondServerStage2 = 3030, CondQuestDone = 4004, CondItemCount = 1020;
@@ -34,7 +35,7 @@ public sealed class FunctionService
         this._skills = skills;
         this._seasons = seasons;
         this._clock = clock;
-        character.ProgressHandlers.Add(SyncAsync);
+        character.ProgressHandlers.Subscribe(SyncAsync);
         // LC_DAL_ServerInfo.PackServerBasicInfo: iOpenDayCount (the server level and EXP catch-up read it).
         character.ServerDay = ServerDay;
     }
@@ -65,10 +66,10 @@ public sealed class FunctionService
         if (session.GmAllFunctionsOpen) return true; // GM panel openallfunc (GmCommands.Presets)
         // Function 1003 has parent 10 and delivered-task gate 10103160.
         // TaskService's no-quest fallback is permissive, so this feature specifically fails closed.
-        if (functionId == 1003 && (session.Tasks == null
+        if (functionId == SeasonTalentFunction && (session.Tasks == null
             || !_data.Table("SeasonTalentTreeConfig").Values.Any(r => GameData.Int(r, "_iId") > 0)
             || !_data.Table("SeasonTalentConfig").Values.Any(r => GameData.Int(r, "_iId") > 0)
-            || !IsOpen(session, 10)
+            || !IsOpen(session, SkillFunction)
             || !TaskService.IsDelivered(session, 10101170) || !TaskService.IsDelivered(session, 10103160))) return false;
         // OpenContent: functions the original never opened (level 999/9999) whose client panel works.
         if (_seasons.OpenContent.Forces(functionId)) return true;

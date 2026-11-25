@@ -155,3 +155,18 @@ memory: the configuration is not written, so the next start uses `Ro3Emu:FieldEx
   A chase blocked on the straight line walks around the obstacle.
 - *(inferred)* Back home from a lost fight, the monster's HP is restored only when its AI lists 900101 (or the NPC has
   no AI row); the others keep their damage.
+
+## Maps nobody is on
+
+- *(inferred)* A public field map is created the first time a player enters it and keeps its monsters afterwards, so a
+  long-running server ticks every field map anyone visited. A monster no player shows and with nothing in progress
+  (no walk, fight, pet or companion fight, march, return or timed slow) only moves its roam clock in its tick
+  (`MonsterService.Dormant`).
+- *(inferred)* A map with no player on it whose units all rested after the last pass is ticked once a second instead
+  of every loop tick (`MapInstance.Tick`). A unit still walking or fighting keeps it on every tick; a player arriving
+  or a unit added wakes it at once. On 20 empty field maps (about 19 000 monsters) this took the map tick from
+  73 ms/s to 2 ms/s and its allocation from 16 MB/s to 0.
+- *(inferred)* An aggressive monster a player shows looks for a target every fourth loop tick (200 ms), staggered by
+  uid, not on every tick. The look reads every player that shows the monster, so on a crowded line (200 players, a
+  thousand monsters) it grew with the square of the crowd: LoadTest S3 with 1,000 bots spent 113 ms/s on map ticks,
+  25 ms/s with the stagger. A player walking into range is noticed within 200 ms.

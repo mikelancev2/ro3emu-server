@@ -45,8 +45,10 @@ namespace Ro3Emu.Server.Game;
 /// login (TryPayAsync's own retry) but gets no history entry, since nothing here revisits a login after the fact to
 /// write one.
 /// </summary>
-public sealed partial class CasualBattleService : IGameTicker
+public sealed partial class CasualBattleService : IGameTicker, ICombatRule
 {
+    bool ICombatRule.CanEventFight(GameSession attacker, GameSession defender) => CanFight(attacker, defender);
+    Task ICombatRule.OnEventPlayerKilledAsync(GameSession killer, GameSession victim) => PlayerKilledAsync(killer, victim);
     public const uint Sync = 5070, ResultNotify = 30132, SetFlag = 30442, FlagNotify = 30443, Rally = 30444,
         RallyNotify = 30445, RallyReply = 30446, RallyReplyNotify = 30447, Follow = 30448, FollowNotify = 30449,
         SwapPosition = 30450, Transfer = 30451;
@@ -159,10 +161,10 @@ public sealed partial class CasualBattleService : IGameTicker
         this._buffs = buffs; this._monsters = monsters; this._world = world;
         _obligations = new RoleObligations<CasualBattleObligationRow>("Mock Battle payout", accounts, loop, time, Online,
             s => s.TimedBattle != null && s.Progress != null, PayAsync, ObligationRetry.TickWithBackoff, log);
-        scene.Loaded.Add(LoadedAsync);
-        scene.Leaving.Add(LeavingAsync);
-        combat.PvpDealt.Add(Dealt);
-        combat.Healed.Add((s, n) => { if (Live(s) is { } m) m.Players[s].Healing += n; });
+        scene.Loaded.Subscribe(LoadedAsync);
+        scene.Leaving.Subscribe(LeavingAsync);
+        combat.PvpDealt.Subscribe(Dealt);
+        combat.Healed.Subscribe((s, n) => { if (Live(s) is { } m) m.Players[s].Healing += n; });
         dungeons.CurrentStatisticsOwner = s => Live(s) is { } m ? Statistics(m) : null;
         HookArena(combat);
         gm.Register("casual", "open|close|start|at <s> (Mock Battle test aid: sign-ups outside the window, start the battle now"
@@ -170,8 +172,6 @@ public sealed partial class CasualBattleService : IGameTicker
     }
 
     private long Now => _time.GetUtcNow().ToUnixTimeSeconds();
-    private long Param(string key, long fallback) => _data.Table("PublicParamConfig").TryGetValue(key, out var v)
-        ? (long)(GameData.Number(v) ?? fallback) : fallback;
 
     private Match? Live(GameSession s) => _active.TryGetValue(s, out var m) && !m.Ending && s.InstanceId == m.Room.Id ? m : null;
 
@@ -721,7 +721,8 @@ public sealed partial class CasualBattleService : IGameTicker
         var mvp = match.Players.Values.Where(p => p.Camp == winCamp).OrderByDescending(p => p.Score)
             .ThenByDescending(p => p.Kills).ThenBy(p => p.Id).FirstOrDefault();
         string resultId = match.Room.Id.ToString(CultureInfo.InvariantCulture);
-        long start = Param("RelaxGVGStartMMR", 1000), win = Param("RelaxGVGWinMMR", 5), lose = Param("RelaxGVGLoseMMR", -3);
+        var pp = Data.Config.PublicParams.Of(_data);
+        long start = pp.RelaxGVGStartMMR ?? 1000, win = pp.RelaxGVGWinMMR ?? 5, lose = pp.RelaxGVGLoseMMR ?? -3;
         var rows = new List<CasualBattleObligationRow>();
         foreach (var p in match.Players.Values.Where(p => !p.Left).OrderBy(p => p.Id))
         {

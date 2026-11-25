@@ -199,8 +199,7 @@ public sealed partial class GuildChallengeService : IGameTicker
     }
     private GuildStore.State? Guild(GameSession s) => s.Role == null ? null : _guilds.ForRole(s.Role.Id);
     private bool IsManager(GameSession s, GuildStore.State g) => g.Members.TryGetValue(s.Role!.Id, out var m)
-        && _data.Table("PublicParamConfig").TryGetValue("GuildChallengeSet", out var ranks)
-        && ranks.ValueKind == JsonValueKind.Array && ranks.EnumerateArray().Any(v => GameData.Number(v) == m.Official);
+        && Data.Config.PublicParams.Of(_data).GuildChallengeSet is { } ranks && ranks.Contains(m.Official);
     private bool Available(GameSession s) => s.Progress != null && s.ActivitiesReady
         && s.SeasonState?.SeasonId == _seasons.SeasonId && s.SeasonState.PlayBookId == _seasons.PlayBook
         && _data.Row("DailyActivityConfig", Activity) is { } row && s.Progress.Level >= GameData.Int(row, "_iiLv")
@@ -486,7 +485,7 @@ public sealed partial class GuildChallengeService : IGameTicker
     }
 
     /// <summary>A settled stage attempt, won or lost, for each guild member present (quest target 103014); listeners post.</summary>
-    public List<Action<GameSession>> Participated { get; } = [];
+    public SyncHook<GameSession> Participated { get; } = new("GuildChallengeService.Participated");
 
     internal async Task SettleAsync(DungeonService.Attempt a, bool won)
     {
@@ -584,7 +583,7 @@ public sealed partial class GuildChallengeService : IGameTicker
                 }
                 try { await s.SendGameAsync(DungeonService.Result, result); }
                 catch (Exception e) { _log.LogWarning(e, "Guild Challenge result delivery failed for {Role}", s.Role?.Id); }
-                foreach (var handler in Participated)
+                foreach (var handler in Participated.Handlers)
                     try { handler(s); }
                     catch (Exception e) { _log.LogError(e, "Guild Challenge participation hook failed for {Role}", s.Role?.Id); }
             }
@@ -618,15 +617,21 @@ public sealed partial class GuildChallengeService : IGameTicker
                 var persisted = JsonSerializer.Deserialize<Clear>(JsonSerializer.SerializeToUtf8Bytes(clear))!;
                 persisted.Delivered = paid;
                 if (claimed) persisted.Personal[role] = []; // recovery/replay result reports only actual grants
-                var granted = await _character.ExchangeLockedAsync(s, [], [], popup: false, sync: false,
-                    boundGoods: claimed ? [] : goods.Select(g => (g.Entry, g.Count, g.Bind)).ToList(), persist: tx =>
+                var granted = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+                {
+                    Popup = false,
+                    Sync = false,
+                    BoundGoods = claimed ? [] : goods.Select(g => (g.Entry, g.Count, g.Bind)).ToList(),
+                    Persist = tx =>
                     {
                         tx.RoleBlob(role, "guild_challenge", JsonSerializer.SerializeToUtf8Bytes(next));
                         tx.Add(new Ro3Emu.Server.Accounts.Persistence.GuildChallengeClearPlan(persisted));
                         tx.WithEconomy(Envelope(role, "guild-challenge-delivery",
                             $"guild-challenge:deliver:{clear.Id}:{role}", DeliveryEffects(role, goods, claimed)));
-                    }, committed: () => { s.GuildChallenge = next; clear.Delivered = paid; clear.Personal = persisted.Personal; },
-                    asyncCommit: true);
+                    },
+                    Committed = () => { s.GuildChallenge = next; clear.Delivered = paid; clear.Personal = persisted.Personal; },
+                    AsyncCommit = true,
+                });
                 if (granted == null) throw new InvalidOperationException("Guild Challenge personal award refused");
             }
             await _character.ItemsChangedAsync(s, stats: false);

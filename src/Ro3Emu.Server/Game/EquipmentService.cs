@@ -22,8 +22,8 @@ public sealed partial class EquipmentService
     private const int ItemTypeEquip = 5;
 
     /// <summary>Committed crafts and paid refinement attempts, for task targets 103024/103006/103005.</summary>
-    public List<Func<GameSession, int, int, int, Task>> Crafted { get; } = [];
-    public List<Func<GameSession, Task>> Refined { get; } = [];
+    public AsyncHook<GameSession, int, int, int> Crafted { get; } = new("EquipmentService.Crafted");
+    public AsyncHook<GameSession> Refined { get; } = new("EquipmentService.Refined");
 
     private readonly GameData _data;
     private readonly CharacterService _character;
@@ -68,13 +68,19 @@ public sealed partial class EquipmentService
         {
             var next = CopyLevels(levels);
             next.Strength[grid] = level + steps;
-            if (await _character.ExchangeLockedAsync(session, cost, [], popup: false, sync: false,
-                persist: tx =>
+            if (await _character.ExchangeLockedAsync(session, new ExchangeRequest
+            {
+                Cost = cost,
+                Popup = false,
+                Sync = false,
+                Persist = tx =>
                 {
                     tx.RoleBlob(session.Role!.Id, "equip_levels", JsonSerializer.SerializeToUtf8Bytes(next));
                     tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-strengthen", cost, [],
                         new { Grid = grid, Before = level, After = level + steps, Steps = steps }));
-                }, committed: () => session.EquipLevels = next) == null)
+                },
+                Committed = () => session.EquipLevels = next,
+            }) == null)
                 error = new(ErrorCodes.StrengthenMaterials, "payment short");
         }
         _log.LogInformation("{Name} strengthens grid {Grid} +{Steps} from {Level}: {Result}", session.Role!.Name, grid, steps, level, error?.Why ?? "ok");
@@ -148,8 +154,12 @@ public sealed partial class EquipmentService
                         if (demoteRoll < GameData.Int(row.Value, "_iDemote")) nextLevels.Refine[grid] = level - 1;
                     }
                 }
-                if (await _character.ExchangeLockedAsync(session, cost, [], popup: false, sync: false,
-                    persist: tx =>
+                if (await _character.ExchangeLockedAsync(session, new ExchangeRequest
+                {
+                    Cost = cost,
+                    Popup = false,
+                    Sync = false,
+                    Persist = tx =>
                     {
                         tx.RoleBlob(session.Role!.Id, "equip_levels", JsonSerializer.SerializeToUtf8Bytes(nextLevels));
                         tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-refine", cost, [],
@@ -159,7 +169,9 @@ public sealed partial class EquipmentService
                                 AfterLuck = nextLevels.Luck.GetValueOrDefault(grid), Success = success, SuccessRoll = successRoll,
                                 DemoteRoll = demoteRoll, Protect = protect, Bonus = bonus
                             }));
-                    }, committed: () => session.EquipLevels = nextLevels) == null)
+                    },
+                    Committed = () => session.EquipLevels = nextLevels,
+                }) == null)
                     error = new(ErrorCodes.RefineMaterials, "payment short");
             }
             levels = session.EquipLevels;
@@ -179,7 +191,7 @@ public sealed partial class EquipmentService
         }
         // A paid failed roll counts as an operation (inferred); refused/unpaid requests never do.
         // Refined handlers may reenter CharacterService.Lock (for example season refinement).
-        if (paid) foreach (var handler in Refined) await handler(session);
+        if (paid) foreach (var handler in Refined.Handlers) await handler(session);
     }
 
     /// <summary>
@@ -284,21 +296,24 @@ public sealed partial class EquipmentService
                 var next = session.EquipmentPlans.Clone();
                 ApplyCraftCounter(next, recipeId, counter);
                 if (entry == 0) error = new(ErrorCodes.CraftParameter, "no output");
-                else if (await _character.ExchangeLockedAsync(session, Pairs(recipe, "_kCost"), [(entry, 1)], popup: false,
-                    persist: tx =>
+                else if (await _character.ExchangeLockedAsync(session, new ExchangeRequest
+                {
+                    Cost = Pairs(recipe, "_kCost"),
+                    Goods = [(entry, 1)],
+                    Popup = false,
+                    Persist = tx =>
                     {
                         tx.RoleBlob(session.Role!.Id, "equip_plans", next.ToByteArray());
                         tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-craft",
                             Pairs(recipe, "_kCost"), [(entry, 1)], new { req.Rank, req.Subtype, Entry = entry }));
                     },
-                    // A same-commit prune of stale plan GUIDs (never caused by craft materials) keeps its plans;
-                    // the counters apply on top of whatever plans the commit published.
-                    committed: () =>
+                    Committed = () =>
                     {
                         var current = session.EquipmentPlans.Clone();
                         ApplyCraftCounter(current, recipeId, counter);
                         session.EquipmentPlans = current;
-                    })
+                    },
+                })
                     is not { Count: > 0 } items) error = new(ErrorCodes.CraftMaterialsShort, "payment short");
                 else made = items[0];
             }
@@ -308,7 +323,7 @@ public sealed partial class EquipmentService
             await session.SendGameAsync(Craft, resp);
             if (made != null) await _character.SyncEquipmentAsync(session);
         }
-        if (made != null) foreach (var handler in Crafted) await handler(session, made.Entry, req.Rank, req.Subtype);
+        if (made != null) foreach (var handler in Crafted.Handlers) await handler(session, made.Entry, req.Rank, req.Subtype);
     }
 
     private static void ApplyCraftCounter(DBEquipInfo info, int recipeId, DBEquipCraftInfo counter)
@@ -347,9 +362,14 @@ public sealed partial class EquipmentService
             : req.ItemCount < 1 ? new(ErrorCodes.Parameter, "bad count")
             : req.CostItem.Count > 0 && !req.CostItem.OrderBy(c => c.Key).Select(c => ((int)c.Key, (long)c.Value)).SequenceEqual(cost.OrderBy(c => c.Entry)) ? new(ErrorCodes.Parameter, "cost differs")
             : null;
-        if (error == null && await _character.ExchangeLockedAsync(session, cost, [(req.ItemId, req.ItemCount)], popup: false,
-            persist: tx => tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-combine", cost,
-                [(req.ItemId, req.ItemCount)], new { req.ItemId, req.ItemCount }))) == null)
+        if (error == null && await _character.ExchangeLockedAsync(session, new ExchangeRequest
+        {
+            Cost = cost,
+            Goods = [(req.ItemId, req.ItemCount)],
+            Popup = false,
+            Persist = tx => tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-combine", cost,
+                [(req.ItemId, req.ItemCount)], new { req.ItemId, req.ItemCount })),
+        }) == null)
             error = new(ErrorCodes.ItemsShort, "materials short");
         _log.LogInformation("{Name} combines {Count}x {Item}: {Result}", session.Role!.Name, req.ItemCount, req.ItemId, error?.Why ?? "ok");
         await session.SendGameAsync(ItemCombine, new ItemCombineResp { Result = error?.Code ?? 0 });
@@ -394,9 +414,14 @@ public sealed partial class EquipmentService
         var inputs = error == null
             ? instances.Select(g => (session.Items.Single(i => i.Guid == g.Key).Entry, (long)g.Value)).ToList()
             : [];
-        if (error == null && await _character.ExchangeLockedAsync(session, [], goods, instances, popup: false,
-            persist: tx => tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-decompose", inputs, goods,
-                new { Inputs = instances.OrderBy(p => p.Key).ToArray(), Goods = goods.OrderBy(g => g.Key).ToArray() }))) == null)
+        if (error == null && await _character.ExchangeLockedAsync(session, new ExchangeRequest
+        {
+            Goods = goods,
+            Instances = instances,
+            Popup = false,
+            Persist = tx => tx.WithEconomy(_character.FamilyEconomy(session, "cd13a/equipment-decompose", inputs, goods,
+                new { Inputs = instances.OrderBy(p => p.Key).ToArray(), Goods = goods.OrderBy(g => g.Key).ToArray() })),
+        }) == null)
             error = new(ErrorCodes.ItemsShort, "bad count");
         _log.LogInformation("{Name} dismantles {Items}: {Result}", session.Role!.Name, string.Join(",", req.DecomposeItem.Keys), error?.Why ?? "ok");
         await session.SendGameAsync(ItemDecompose, new ItemDecomposeResp { Result = error?.Code ?? 0 });

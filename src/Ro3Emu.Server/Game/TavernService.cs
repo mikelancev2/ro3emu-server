@@ -110,7 +110,7 @@ public sealed partial class TavernService : Messaging.IMessageModule, IGameTicke
     }
 
     /// <summary>Raised on the loop after a role's Star Power changed (AchievementService re-reads 106008).</summary>
-    public List<Action<GameSession>> PopularityChanged { get; } = [];
+    public SyncHook<GameSession> PopularityChanged { get; } = new("TavernService.PopularityChanged");
 
     /// <summary>A role's own Tavern counters, role blob "barroom" (JSON). Popularity and WeekPopularity are the Star Power
     /// received from gifts (5043 popularity / weekPopularity); ActDays counts the days whose stay reached the daily quest's
@@ -270,7 +270,7 @@ public sealed partial class TavernService : Messaging.IMessageModule, IGameTicke
                 if (ends <= now) room.Tags.Remove(tag);
         }
         if (nowMs < _heatWindowEndsMs) return;
-        long window = Param("BarroomHeatTagsTime", DefaultHeatTagsMs);
+        long window = (Data.Config.PublicParams.Of(_data).BarroomHeatTagsTime ?? DefaultHeatTagsMs);
         _heatWindowEndsMs = nowMs + window;
         HeatWindowLocked(now + window / 1000);
     }
@@ -302,16 +302,10 @@ public sealed partial class TavernService : Messaging.IMessageModule, IGameTicke
 
     private long NowSec() => _clock.GetUtcNow().ToUnixTimeSeconds();
 
-    private long Param(string key, long fallback) => _data.Table("PublicParamConfig").TryGetValue(key, out var value)
-        && value.ValueKind == JsonValueKind.Number ? (long)(GameData.Number(value) ?? fallback) : fallback;
-
-    private long[] ParamList(string key) => _data.Table("PublicParamConfig").TryGetValue(key, out var value)
-        && value.ValueKind == JsonValueKind.Array ? [.. value.EnumerateArray().Select(v => (long)(GameData.Number(v) ?? 0))] : [];
-
-    private int SpeakNum() => (int)Math.Clamp(Param("BarroomSpeakNum", DefaultSpeakNum), 1, 100);
+    private int SpeakNum() => (int)Math.Clamp((Data.Config.PublicParams.Of(_data).BarroomSpeakNum ?? DefaultSpeakNum), 1, 100);
 
     /// <summary>PublicParamConfig.BarroomTaskID, the daily Tavern quest.</summary>
-    public long TaskId() => Param("BarroomTaskID", DefaultTaskId);
+    public long TaskId() => (Data.Config.PublicParams.Of(_data).BarroomTaskID ?? DefaultTaskId);
 
     /// <summary>A day's stay that counts as active: the daily quest's 106010 requirement (TaskConfig 2000: 1200 s).</summary>
     private int ActSeconds()

@@ -60,7 +60,7 @@ public sealed partial class AuctionService
     }
 
     /// <summary>After an accepted bid on a guild lot (quest target 103003, TaskService.MiscTargets.cs).</summary>
-    public List<Action<GameSession>> GuildBid { get; } = [];
+    public SyncHook<GameSession> GuildBid { get; } = new("AuctionService.GuildBid");
 
     public async Task BidAsync(GameSession s, BiddingAuctionReq req)
     {
@@ -69,7 +69,7 @@ public sealed partial class AuctionService
         bool guildLot = store.Get(req.AuctionId)?.Type == AuctionType.Guild;
         var result = await BidCoreAsync(s, req.AuctionId, req.Price, req.OpType, req.GuildId, req.CheckOnly, req.ExtraPrice);
         await SendSessionAuctionAsync(s, requestRole, requestLease, Bid, result);
-        if (guildLot && !req.CheckOnly && result.Result == 0) foreach (var handler in GuildBid) handler(s);
+        if (guildLot && !req.CheckOnly && result.Result == 0) foreach (var handler in GuildBid.Handlers) handler(s);
     }
 
     private async Task<BiddingAuctionRes> BidCoreAsync(GameSession s, long id, int price, BiddingType op, long guildId,
@@ -148,11 +148,17 @@ public sealed partial class AuctionService
                         next.LastBid = Now;
                         next.Revision++;
                         if (!next.Joined.Contains(role)) next.Joined.Add(role);
-                        long countdown = Math.Max(0, Param("AuctionCountdown", 5));
-                        if (next.End - Now <= countdown) next.End = checked(next.End + Math.Max(0, Param("AuctionExtendTime", 3)));
+                        long countdown = Math.Max(0, (Data.Config.PublicParams.Of(data).AuctionCountdown ?? 5));
+                        if (next.End - Now <= countdown) next.End = checked(next.End + Math.Max(0, (Data.Config.PublicParams.Of(data).AuctionExtendTime ?? 3)));
                         if (op == BiddingType.Fixed) { next.State = AuctionState.Settled; next.Winner = role; next.End = Now; }
-                        var paid = await character.ExchangeLockedAsync(s, debit == 0 ? [] : [(next.Currency, debit)], [],
-                            popup: false, sync: false, asyncCommit: true, committed: () => committed = true, persist: tx =>
+                        var paid = await character.ExchangeLockedAsync(s, new ExchangeRequest
+                        {
+                            Cost = debit == 0 ? [] : [(next.Currency, debit)],
+                            Popup = false,
+                            Sync = false,
+                            AsyncCommit = true,
+                            Committed = () => committed = true,
+                            Persist = tx =>
                             {
                                 store.EnlistSave(next, tx);
                                 if (oldOwner != 0 && oldOwner != role) QueueOutbidLocked(next, oldOwner, oldReserve, tx);
@@ -174,7 +180,8 @@ public sealed partial class AuctionService
                                         });
                                 tx.WithEscrowEconomy(economy);
                                 RequireScope(scope, tx);
-                            });
+                            },
+                        });
                         if (paid == null) return BidResponse(s, row, op, extra, ErrorCodes.AuctionCurrencyShort);
                         changed = next;
                         outbid = refunds.FirstOrDefault();
@@ -224,8 +231,14 @@ public sealed partial class AuctionService
         var personal = oldPersonal is { } saved ? DBAuction.Parser.ParseFrom(saved) : new DBAuction();
         personal.PreBuyNum[PrebuyKey(row.Type, row.SrcType, row.Entry)] = pending.Count(p => p.Role == s.Role.Id
             && p.Type == row.Type && p.SrcType == row.SrcType && p.Entry == row.Entry) + (prior == null ? 1 : 0);
-        var paid = await character.ExchangeLockedAsync(s, delta > 0 ? [(row.Currency, delta)] : [], [],
-                popup: false, sync: false, asyncCommit: true, committed: committed, persist: tx =>
+        var paid = await character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Cost = delta > 0 ? [(row.Currency, delta)] : [],
+            Popup = false,
+            Sync = false,
+            AsyncCommit = true,
+            Committed = committed,
+            Persist = tx =>
                 {
                     store.EnlistPrebuy(order, tx);
                     EnlistPersonal(s.Role.Id, oldPersonal, personal, tx);
@@ -239,7 +252,8 @@ public sealed partial class AuctionService
                             PreviousUnitPrice = prior?.UnitPrice ?? 0, Debit = delta
                         }));
                     RequireScope(scope, tx);
-                });
+                },
+        });
         if (paid == null) return (BidResponse(s, row, op, extra, ErrorCodes.AuctionCurrencyShort), false, false);
         return (BidResponse(s, row, op, extra, 0), true, delta < 0);
     }

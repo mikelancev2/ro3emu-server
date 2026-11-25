@@ -24,14 +24,13 @@ public sealed class CareerSpecialTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         var (h, m, g) = TestPorts.FreePorts();
-        _app = ServerHost.Create([], o => { o.DataDir = _dir; o.GameDataDir = Path.Combine(RepoRoot(), "data"); o.HttpPort = h; o.MicroGatePort = m; o.GameGatePort = g; });
+        _app = ServerHost.Create([], o => { o.DataDir = _dir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data"); o.HttpPort = h; o.MicroGatePort = m; o.GameGatePort = g; });
         await _app.StartAsync(); _http = $"http://127.0.0.1:{h}";
     }
 
     public async Task DisposeAsync()
     {
-        await _app.StopAsync(); await _app.DisposeAsync(); Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        try { Directory.Delete(_dir, true); } catch (IOException) { }
+        await _app.StopAsync(); await _app.DisposeAsync(); try { Directory.Delete(_dir, true); } catch (IOException) { }
     }
 
     private async Task<BotClient> InWorld(string name, bool create = true)
@@ -492,6 +491,33 @@ public sealed class CareerSpecialTests : IAsyncLifetime
         Assert.DoesNotContain(a.Inbox.Snapshot(), e => e.IsGame(CombatService.UseSkill) && CastSkillRsp.Parser.ParseFrom(e.Body).Result != 0);
     }
 
+    // Warg Hunt's far row charges in 80 ms. At a round trip above that, a walk the client sent before it had the charge
+    // arrives after it: taken, it set off Swift Warg from where the charge began, in that walk's direction.
+    [ClientDataFact]
+    public async Task AWalkSentBeforeWargHuntsChargeDoesNotSetOffSwiftWarg()
+    {
+        await using var a = await InWorld("Alice");
+        await Become("alice", 3400, 99, 13310, 13311, 13323, 13326);
+        await RideAsync(a, Wolf);
+        var target = await WolfTargetAsync(10);
+        await SwiftWargOnCooldownAsync(2);
+        var before = Session("alice").Position.Clone();
+        await CastOnAsync(a, 1332301, target);
+        var charge = await Next(a, CombatService.SkillMove, SkillStartMoveNotify.Parser, m => m.EntityID == (ulong)Session("alice").Role!.Id);
+        await SwiftWargResetAsync();
+        await Task.Delay(200); // the round trip
+        float back = MonsterService.Angle(charge.EndPos.X, charge.EndPos.Z, charge.StartPos.X, charge.StartPos.Z);
+        await a.SendGameAsync(MsgId.Walk, new WalkReq { Pos = before, Dir = back, Face = back, SpeedRate = 1 });
+        await Task.Delay(1300); // past Warg Hunt's 1200 ms action, which a walk would wait for
+        Assert.DoesNotContain(a.Inbox.Snapshot(), e => e.IsGame(CombatService.SkillMove) && SkillStartMoveNotify.Parser.ParseFrom(e.Body).SkillConfigId == 1332602);
+
+        // The first walk from the landing sets it off there, along that walk.
+        float on = MonsterService.Angle(charge.StartPos.X, charge.StartPos.Z, charge.EndPos.X, charge.EndPos.Z);
+        await a.SendGameAsync(MsgId.Walk, new WalkReq { Pos = charge.EndPos, Dir = on, Face = on, SpeedRate = 1 });
+        var dash = await Next(a, CombatService.SkillMove, SkillStartMoveNotify.Parser, m => m.SkillConfigId == 1332602);
+        Assert.InRange(MonsterService.Distance(dash.StartPos.X, dash.StartPos.Z, charge.EndPos.X, charge.EndPos.Z), 0f, 0.01f);
+    }
+
     private async Task WalkEastAsync(BotClient a)
     {
         var at = await _app.Services.GetRequiredService<GameLoop>().InvokeAsync(() => Task.FromResult(Session("alice").Position.Clone()));
@@ -502,7 +528,7 @@ public sealed class CareerSpecialTests : IAsyncLifetime
     {
         var alice = Session("alice");
         alice.Progress!.Skills[13326] = level;
-        alice.SkillCds[13326] = MonsterService.NowMs + 60000;
+        alice.SkillCds[13326] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 60000;
         return Task.CompletedTask;
     });
 
@@ -689,7 +715,4 @@ public sealed class CareerSpecialTests : IAsyncLifetime
         var restored = await Next(again, CareerSpecialService.Sync, DBCareerSpecialIncrement.Parser);
         Assert.Equal(0, restored.MountsSlot.All.CartRemouldCfg);
     }
-
-    private static string RepoRoot()
-    { for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent) if (File.Exists(Path.Combine(d.FullName, "Ro3Emu.slnx"))) return d.FullName; throw new DirectoryNotFoundException(); }
 }

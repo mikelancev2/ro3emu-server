@@ -11,7 +11,7 @@ public sealed partial class GuildService
 {
     // Membership/name admission is serial within this family; guild resources still overlap the
     // exact guild key used by the already-converted market. Unrelated role work remains independent.
-    private async Task RunGuildAsync(GameSession? actor, IEnumerable<long> guildIds,
+    internal async Task RunGuildAsync(GameSession? actor, IEnumerable<long> guildIds,
         IEnumerable<long> roleIds, Func<Task> command, bool maintenance = false, bool disband = false, bool characterGate = false)
     {
         var owners = ownerRegistry;
@@ -155,15 +155,19 @@ public sealed partial class GuildService
                 {
                     long previous = online.Guild?.GuildId ?? 0, previousOfficial = online.Guild?.Official ?? 0;
                     online.Guild = view;
-                    if (previous != view.GuildId) chat.GuildMembershipChanged(online, previous);
+                    if (previous != view.GuildId)
+                    {
+                        chat.GuildMembershipChanged(online, previous);
+                        foreach (var handler in GuildIdChanged.Handlers) handler(online);
+                    }
                     if (previous != view.GuildId || previousOfficial != view.Official)
-                        foreach (var handler in MembershipChanged) handler(online);
+                        foreach (var handler in MembershipChanged.Handlers) handler(online);
                 }
             });
         }
     }
 
-    private async Task<bool> SaveGuildAsync(GuildStore.State guild, IEnumerable<long>? removed = null, EconomyEnvelope? economy = null)
+    internal async Task<bool> SaveGuildAsync(GuildStore.State guild, IEnumerable<long>? removed = null, EconomyEnvelope? economy = null)
     {
         var transaction = roles.NewTransaction();
         store.EnlistSave(guild, transaction);
@@ -173,7 +177,7 @@ public sealed partial class GuildService
         catch (Microsoft.Data.Sqlite.SqliteException e) when (e.SqliteExtendedErrorCode is 1555 or 2067) { return false; }
     }
 
-    private async Task SavePersonalAsync(GameSession session, DBRoleGuildInfo view)
+    internal async Task SavePersonalAsync(GameSession session, DBRoleGuildInfo view)
     {
         var bytes = view.ToByteArray();
         if (roles.BlobUnchanged(session.Role!.Id, "guild_info", bytes)) { session.Guild = view; return; } // a login's normalization

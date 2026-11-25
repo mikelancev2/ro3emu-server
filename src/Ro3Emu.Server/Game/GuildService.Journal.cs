@@ -21,18 +21,18 @@ public sealed partial class GuildService
 {
     public const uint Events = 32228;
     private const int EvApproved = 1, EvLeft = 2, EvKicked = 3, EvPosition = 4, EvLeader = 6, EvJoined = 8,
-        EvBuilding = 9, EvPurchase = 12, EvFounded = 13, EvAuction = 14;
-    private const int GuildMaterialItem = 126; // LC_GuildHelper.GUILD_MATERIALS_ITEM_ID
+        EvBuilding = 9, EvFounded = 13, EvAuction = 14;
+    internal const int EvPurchase = 12;
+    internal const int GuildMaterialItem = 126; // LC_GuildHelper.GUILD_MATERIALS_ITEM_ID
 
-    private static LanguageParam Str(string value) => new() { Tp = LanguageParamType.Str, StrParam = value };
-    private static LanguageParam Int(long value) => new() { Tp = LanguageParamType.Int, IntParam = value };
+    internal static LanguageParam Str(string value) => new() { Tp = LanguageParamType.Str, StrParam = value };
+    internal static LanguageParam Int(long value) => new() { Tp = LanguageParamType.Int, IntParam = value };
 
-    internal static byte[] JournalRow(int cfgId, long[] players, params LanguageParam[] values)
+    internal static byte[] JournalRow(int cfgId, long[] players, long? nowMs, params LanguageParam[] values)
     {
-        // A display timestamp only (the auction ledger builds rows outside the service), so the wall clock.
         var row = new GuildEventData
         {
-            EventCfgID = cfgId, Time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), Param = new LanguageData()
+            EventCfgID = cfgId, Time = nowMs ?? TimeProvider.System.GetUtcNow().ToUnixTimeMilliseconds(), Param = new LanguageData()
         };
         row.PlayerID.AddRange(players);
         row.Param.Param.AddRange(values);
@@ -40,15 +40,15 @@ public sealed partial class GuildService
     }
 
     /// <summary>Queue a journal row on the guild; it commits with the guild's next save.</summary>
-    private void Journal(GuildStore.State g, int cfgId, long[] players, params LanguageParam[] values)
+    internal void Journal(GuildStore.State g, int cfgId, long[] players, params LanguageParam[] values)
     {
-        store.JournalCap = (int)Math.Clamp(Setting("GuildEventDateMaxNum", 500)[0], 1, 10_000);
-        g.PendingEvents.Add(JournalRow(cfgId, players, values));
+        store.JournalCap = (int)Math.Clamp((Data.Config.GuildSettings.Of(data).GuildEventDateMaxNum ?? 500), 1, 10_000);
+        g.PendingEvents.Add(JournalRow(cfgId, players, NowMs(), values));
     }
 
     /// <summary>A guild auction lot went to a member: "${1} won ${2} in the Guild Auction" (event 14).</summary>
-    internal static byte[] AuctionWonRow(long winner, string winnerName, long itemId) =>
-        JournalRow(EvAuction, [winner], Str(winnerName), Int(itemId));
+    internal static byte[] AuctionWonRow(long winner, string winnerName, long itemId, long? nowMs = null) =>
+        JournalRow(EvAuction, [winner], nowMs, Str(winnerName), Int(itemId));
 
     private long JournalType(long cfgId) =>
         data.Row("GuildEventConfig", cfgId) is { } row ? GameData.Int(row, "_iType") : 0;

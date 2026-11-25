@@ -26,7 +26,7 @@ public sealed partial class BuffService
     public async Task<bool> TryPreventLethalAsync(GameSession p)
     {
         if (p.Role == null || p.Dead) return false;
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         if (p.ImmuneDeathOffer is { } pending)
         {
             if (pending.ExpiresMs > now) return true;
@@ -40,7 +40,7 @@ public sealed partial class BuffService
             int percent = automatic.ConfigId == 16340401 ? 100 : 30;
             await RemoveAsync(p, automatic); // one fatal hit uses one charge (inferred from descriptions).
             var stats = _character.Stats(p);
-            await _character.SetHpSpAsync(p, Math.Max(1, stats[101] * percent / 100), null);
+            await _character.SetHpSpAsync(p, Math.Max(1, stats[AttributeId.MaxHp] * percent / 100), null);
             return true;
         }
 
@@ -48,8 +48,7 @@ public sealed partial class BuffService
             && GameData.Int(row, "_iBuffID") is 20520 or 20521
             && p.BuffEffectCds.GetValueOrDefault(b.Guid) <= now);
         if (choice == null) return PassiveLethalSave != null && await PassiveLethalSave(p);
-        long window = _data.Table("PublicParamConfig").TryGetValue("ImmuneDeadConfirmTimeMs", out var value)
-            ? (long)(GameData.Number(value) ?? 5000) : 5000;
+        long window = Data.Config.PublicParams.Of(_data).ImmuneDeadConfirmTimeMs ?? 5000;
         window = Math.Clamp(window, 1000, 30000);
         p.ImmuneDeathOffer = new ImmuneDeathOffer(choice.Guid, choice.ConfigId, now + window);
         long cd = InternalCooldownMs(choice.ConfigId);
@@ -74,7 +73,7 @@ public sealed partial class BuffService
     public async Task ConfirmImmuneDeathAsync(GameSession p, PlayerConfirmImmuneDeadReq req)
     {
         var offer = p.ImmuneDeathOffer;
-        bool valid = offer != null && offer.ExpiresMs >= MonsterService.NowMs && !p.Dead;
+        bool valid = offer != null && offer.ExpiresMs >= _loop.NowMs && !p.Dead;
         await p.SendGameAsync(ImmuneDeathConfirm, new PlayerConfirmImmuneDeadRsp
         {
             Result = valid ? 0 : ErrorCodes.Parameter,
@@ -97,14 +96,14 @@ public sealed partial class BuffService
         int percent = (int)Math.Clamp(DescriptionNumber(desc, 1, 100), 1, 100);
         if (group == 20520)
         {
-            p.ImmuneRecoveryUntilMs = MonsterService.NowMs + 3000;
+            p.ImmuneRecoveryUntilMs = _loop.NowMs + 3000;
             p.ImmuneRecoveryPercent = (int)Math.Clamp(DescriptionNumber(desc, 4, 20), 1, 100);
             await _character.SetHpSpAsync(p, 1, null);
         }
         else
         {
-            await _character.SetHpSpAsync(p, Math.Max(1, stats[101] * percent / 100),
-                Math.Max(1, stats[102] * percent / 100));
+            await _character.SetHpSpAsync(p, Math.Max(1, stats[AttributeId.MaxHp] * percent / 100),
+                Math.Max(1, stats[AttributeId.MaxSp] * percent / 100));
             await ReduceDamageAfterReviveAsync(p, new BuffConfig(row));
         }
         await RefreshControlAsync(p);
@@ -170,8 +169,8 @@ public sealed partial class BuffService
     {
         if (p.Role == null || p.Dead) return;
         var stats = _character.Stats(p);
-        await _character.SetHpSpAsync(p, Math.Max(1, stats[101] * percent / 100),
-            Math.Max(1, stats[102] * percent / 100));
+        await _character.SetHpSpAsync(p, Math.Max(1, stats[AttributeId.MaxHp] * percent / 100),
+            Math.Max(1, stats[AttributeId.MaxSp] * percent / 100));
         await RefreshControlAsync(p);
     }
 }

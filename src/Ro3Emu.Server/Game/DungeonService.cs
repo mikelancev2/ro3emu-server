@@ -3,6 +3,7 @@ using Google.Protobuf;
 using Romsg;
 using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Maps;
 
 namespace Ro3Emu.Server.Game;
@@ -25,13 +26,13 @@ public sealed partial class DungeonService
     public const uint PlotSceneEvent = 84012;
 
     /// <summary>Committed clears only; consumers receive the scene entry and whether an actual personal award was paid.</summary>
-    public List<Func<GameSession, int, bool, Task>> Completed { get; } = [];
+    public AsyncHook<GameSession, int, bool> Completed { get; } = new("DungeonService.Completed");
     /// <summary>After <see cref="Completed"/> for a TenGameplay run: the boss (TenGameplayBossConfig._iBoss) and the
     /// run's settled participants (quest target 106602).</summary>
-    public List<Func<GameSession, long, IReadOnlyCollection<GameSession>, Task>> MultiBossCleared { get; } = [];
+    public AsyncHook<GameSession, long, IReadOnlyCollection<GameSession>> MultiBossCleared { get; } = new("DungeonService.MultiBossCleared");
     /// <summary>A loaded member's dungeon task tracker (TaskService.OnDungeonRun): scene, instance and the scripted steps
     /// the run has passed. Listeners post their work.</summary>
-    public List<Action<GameSession, long, long, int>> RunTracked { get; } = [];
+    public SyncHook<GameSession, long, long, int> RunTracked { get; } = new("DungeonService.RunTracked");
     /// <summary>Guild Challenge owns admission and rewards; this engine retains scenes, combat and cleanup.</summary>
     internal Func<GameSession, EnterDungeonReq, Task<bool>>? GuildChallengeEnter { get; set; }
     /// <summary>Another private-room owner whose 30402 exit revives a dead member on return (the guild home).</summary>
@@ -95,24 +96,24 @@ public sealed partial class DungeonService
         // A rider's client reports the carrier's walk; a sliding client moves faster than it walks (DungeonService.Slide).
         scene.WalkOnRide = s => vehicles.IsSeatedOnSceneActor(s) || Sliding(s);
         vehicles.ExitHeld = RideHolds;
-        combat.GrantedSkill.Add(FiresCannon);
+        combat.GrantedSkill.Subscribe(FiresCannon);
         combat.AimsFromSeat = FiresCannon;
         gm.Register("actors", "[npcId | walk <x> <z> | use] (scripted scene test aid: the step's scene actors, jump beside one, arrive at x z as a walk would, or complete the step server-side)", ActorsGmAsync);
         WireRaidTrials(combat, gm);
         teams.MultiDungeonInfo = TeamDungeonInfo;
-        combat.DamageAdjusters.Add((s, m, _, _, damage) => BondDamage(s, m, damage, incoming: false));
-        combat.IncomingDamageAdjusters.Add((m, s, _, damage) => Task.FromResult(BondDamage(s, m, damage, incoming: true)));
-        scene.Loaded.Add(LoadedAsync);
-        scene.Leaving.Add(AbandonAsync);
-        scene.Leaving.Add(StopSlideAsync);
-        combat.Killed.Add(KilledAsync);
-        combat.BeforeKilled.Insert(0, FreezeTerminalKillAsync);
-        combat.PlayerDied.Add(PlayerDiedAsync);
-        combat.ReviveInfoOwners.Add(s => Active(s) != null); // PlayerDiedAsync publishes the run's own 30112
-        combat.Dealt.Add((s, m, n) => { if (Active(s) is { } a && m.InstanceId == a.Room.Id) a.Stats[s.Role!.Id].TotalDamage += n; });
-        combat.Taken.Add((m, s, n, dead) => { if (Active(s) is { } a && m.InstanceId == a.Room.Id) a.Stats[s.Role!.Id].TotalBeDamage += n; });
-        combat.Healed.Add((s, n) => { if (Active(s) is { } a) a.Stats[s.Role!.Id].TotalCure += n; });
-        character.ProgressHandlers.Add(SyncLockedAsync); // CharacterService invokes these while holding StateLock.
+        combat.DamageAdjusters.Subscribe((s, m, _, _, damage) => BondDamage(s, m, damage, incoming: false));
+        combat.IncomingDamageAdjusters.Subscribe((m, s, _, damage) => Task.FromResult(BondDamage(s, m, damage, incoming: true)));
+        scene.Loaded.Subscribe(LoadedAsync);
+        scene.Leaving.Subscribe(AbandonAsync);
+        scene.Leaving.Subscribe(StopSlideAsync);
+        combat.Killed.Subscribe(KilledAsync);
+        combat.BeforeKilled.Subscribe(FreezeTerminalKillAsync, order: CombatService.BeforeKilledOrderDungeon);
+        combat.PlayerDied.Subscribe(PlayerDiedAsync);
+        combat.ReviveInfoOwners.Subscribe(s => Active(s) != null); // PlayerDiedAsync publishes the run's own 30112
+        combat.Dealt.Subscribe((s, m, n) => { if (Active(s) is { } a && m.InstanceId == a.Room.Id) a.Stats[s.Role!.Id].TotalDamage += n; });
+        combat.Taken.Subscribe((m, s, n, dead) => { if (Active(s) is { } a && m.InstanceId == a.Room.Id) a.Stats[s.Role!.Id].TotalBeDamage += n; });
+        combat.Healed.Subscribe((s, n) => { if (Active(s) is { } a) a.Stats[s.Role!.Id].TotalCure += n; });
+        character.ProgressHandlers.Subscribe(SyncLockedAsync); // CharacterService invokes these while holding StateLock.
     }
 
     public sealed class Attempt
@@ -277,8 +278,7 @@ public sealed partial class DungeonService
         p.Ready.Add(s); // Initiating the request is the leader's affirmative answer (inferred).
         foreach (var member in members) _pending[member] = p;
         await BroadcastReadyAsync(p);
-        int seconds = _data.Table("PublicParamConfig").TryGetValue("GetInPositionMaxTime", out var timeout)
-            ? (int)(GameData.Number(timeout) ?? 30) : 30;
+        int seconds = (int)(Data.Config.PublicParams.Of(_data).GetInPositionMaxTime ?? 30);
         _loop.ScheduleLegacy(TimeSpan.FromSeconds(seconds), () => p.Closed ? Task.CompletedTask : CancelAsync(p, ErrorCodes.Parameter, 0));
     }
 
@@ -438,7 +438,7 @@ public sealed partial class DungeonService
     internal void TrackRun(Attempt a, IEnumerable<GameSession> members, int step)
     {
         foreach (var s in members)
-            foreach (var handler in RunTracked) handler(s, a.Plan.SceneEntry, a.Room.Id, step);
+            foreach (var handler in RunTracked.Handlers) handler(s, a.Plan.SceneEntry, a.Room.Id, step);
     }
 
     // Waiting for all remaining members before starting the encounter clock is (inferred).
@@ -479,6 +479,7 @@ public sealed partial class DungeonService
         if (a.Dracula is { } dracula) snapshot.Vars.Add(dracula.Vars());
         if (FunctionButtons(a) is { } buttons) snapshot.Vars.Add(buttons);
         if (GuideWays(a) is { } ways) snapshot.Vars.Add(ways);
+        if (Resurrections(a) is { } revives) snapshot.Vars.Add(revives);
         if (a.Preparing)
         {
             // (inferred) The preparation phase is the map's initializing state, ending when the boss fight begins.
@@ -580,7 +581,7 @@ public sealed partial class DungeonService
     private async Task StartAsync(Attempt a)
     {
         if (a.Started || a.Settled || a.Room.Closed) return;
-        a.Started = true; a.StartedAt = _loop.Now; a.StartMs = MonsterService.NowMs;
+        a.Started = true; a.StartedAt = _loop.Now; a.StartMs = _loop.NowMs;
         if (StartBattleScenes.Contains(a.Plan.SceneEntry) && a.Plan.Multi != null)
         {
             // A Realm of the Gods raid opens with its preparation phase: the leader's Start Battle (30125) or the
@@ -595,7 +596,7 @@ public sealed partial class DungeonService
 
     private async Task BeginFightAsync(Attempt a)
     {
-        a.StartedAt = _loop.Now; a.StartMs = MonsterService.NowMs;
+        a.StartedAt = _loop.Now; a.StartMs = _loop.NowMs;
         await BroadcastAsync(a, BaseInfo, Snapshot(a));
         await SpawnWaveAsync(a);
         StartRaidTrials(a);
@@ -744,14 +745,26 @@ public sealed partial class DungeonService
     /// <summary>The run revives this role without using a count: OnClickRevive [0], or its timed [2,n] request pending.</summary>
     private static bool ReviveIsFree(Attempt a, long roleId) => ImmediateRevive(a) || a.AutoReviveAt.ContainsKey(roleId);
 
-    /// <summary>All resurrection sources obey the active dungeon's click-revive allowance, as ReviveAsync reads it.</summary>
+    // A NoRevive boss room (Phantom Realm, TenGameplayBossConfig) refuses the dead player's own revive (ErrorCodeConfig
+    // 554 "Manual Revive is not allowed in this area"), not a teammate's: the boss's _iOriginalReviveNum plus the Divine
+    // Blessing's _iAddReviveNum is the party's count (Localization_en: "increases the number of party Revives available
+    // in the Dungeon"; ErrorCodeConfig 570 "Not enough party Revive attempts remaining"). The whole room shares it, one
+    // count per revive (inferred).
+    private static bool PartyRevives(Attempt a) => a.Plan.Boss != null && new DungeonConfig(a.Plan.Config).ReviveTrigger == NoRevive;
+    private static int PartyRevivesLeft(Attempt a) => a.Plan.Boss is { } boss
+        ? Math.Max(0, (int)new TenGameplayBossConfig(boss).OriginalReviveNum) + BlessingRevives(a) - a.RevivesUsed.Values.Sum() : 0;
+    private const int NoRevive = 2; // Lua_GameDefine enum_ReviveTriggerType.NoRevive
+
+    /// <summary>All resurrection sources obey the active dungeon's click-revive allowance, as ReviveAsync reads it, or in
+    /// a NoRevive boss room the party's count.</summary>
     public int ExternalReviveError(GameSession s)
     {
         if (!s.Dead) return ErrorCodes.TargetAlive;
         if (s.DungeonAttempt == null) return 0;
         var a = Active(s);
-        return a == null || s.Role == null || a.Reviving.Contains(s)
-            || !ReviveIsFree(a, s.Role.Id) && a.RevivesUsed.GetValueOrDefault(s.Role.Id) >= ReviveLimit(a)
+        if (a == null || s.Role == null || a.Reviving.Contains(s)) return ErrorCodes.FeatureUnavailable;
+        if (PartyRevives(a)) return PartyRevivesLeft(a) > 0 ? 0 : ErrorCodes.PartyRevivesUsedUp;
+        return !ReviveIsFree(a, s.Role.Id) && a.RevivesUsed.GetValueOrDefault(s.Role.Id) >= ReviveLimit(a)
             ? ErrorCodes.FeatureUnavailable : 0;
     }
 
@@ -765,8 +778,23 @@ public sealed partial class DungeonService
         a.AutoReviveAt.Remove(s.Role.Id); // or the next death keeps this one's time (PlayerDiedAsync TryAdd)
     }
 
-    public Task PublishExternalReviveAsync(GameSession s) => s.Role != null && Active(s) is { } a
-        ? SendReviveInfoAsync(s, a) : Task.CompletedTask;
+    public async Task PublishExternalReviveAsync(GameSession s)
+    {
+        if (s.Role == null || Active(s) is not { } a) return;
+        await SendReviveInfoAsync(s, a);
+        if (Resurrections(a) is { } revives)
+            await BroadcastAsync(a, Event, new DungeonEventNotify
+            {
+                DungeonEntry = a.Plan.SceneEntry, EventType = (DungeonEventType)4, StageNum = a.Wave + 1, LevelNum = 1, Vars = { revives },
+            });
+    }
+
+    /// <summary>LC_DunGeon_VarDefine 140 CNumberOfResurrections: the party's count left, which the HUD shows as
+    /// "Revives Remaining: ${1}" (UI_Sys_Main_Team_ResurrectionsWidget, UIWords 56126). Without it the HUD keeps its
+    /// prefab's "10".</summary>
+    private static DungeonVar? Resurrections(Attempt a) => PartyRevives(a)
+        ? new DungeonVar { VarId = ResurrectionsVar, Vi64 = { PartyRevivesLeft(a) } } : null;
+    private const int ResurrectionsVar = 140;
 
     private async Task PlayerDiedAsync(GameSession s)
     {
@@ -988,13 +1016,13 @@ public sealed partial class DungeonService
             if (!committed) continue;
             if (committed && success)
             {
-                foreach (var handler in Completed)
+                foreach (var handler in Completed.Handlers)
                     try { await handler(s, (int)a.Plan.SceneEntry, goods.Count > 0); }
                     catch (Exception e) { _log.LogError(e, "Dungeon clear callback failed for {Role}, instance {Instance}", roleId, a.Room.Id); }
                 if (a.Plan.Boss is { } boss)
                 {
                     var party = participants.Select(p => p.Session).ToArray();
-                    foreach (var handler in MultiBossCleared)
+                    foreach (var handler in MultiBossCleared.Handlers)
                         try { await handler(s, GameData.Int(boss, "_iBoss"), party); }
                         catch (Exception e) { _log.LogError(e, "Dungeon boss clear callback failed for {Role}, instance {Instance}", roleId, a.Room.Id); }
                 }

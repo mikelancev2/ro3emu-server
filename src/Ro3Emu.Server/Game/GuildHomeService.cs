@@ -16,8 +16,6 @@ public sealed class GuildHomeService : IGameTicker
 {
     public const uint EnterHome = 32256;
     public const long DefaultScene = 4000101;
-    /// <summary>GuildHomepageShowConfig[1]._iFunction (Guild, condition 2000010 = Lv21).</summary>
-    private const int GuildFunction = 13;
     /// <summary>SwitchSceneReason_EnterDungeon, as 30400 (inferred for 32256).</summary>
     private const int EnterReason = 3;
 
@@ -39,9 +37,7 @@ public sealed class GuildHomeService : IGameTicker
     {
         this._data = data; this._guilds = guilds; this._functions = functions; this._instances = instances;
         this._scene = scene; this._dungeons = dungeons; this._loop = loop; this._time = time;
-        Scene = data.Table("GuildSettingConfig").TryGetValue("GuildMap", out var row)
-            && row.TryGetProperty("_kValue", out var value) && GameData.Number(value) is { } map && map > 0
-            ? (long)map : DefaultScene;
+        Scene = Data.Config.GuildSettings.Of(data).GuildMap is > 0 and var map ? map : DefaultScene;
         // (inferred, spec §6.5) Exiting the home revives a dead member on return, as ordinary dungeon runs do.
         dungeons.RecoverDeadOnLeave = roomId => GuildOfRoom(roomId) != null;
     }
@@ -85,7 +81,7 @@ public sealed class GuildHomeService : IGameTicker
         if (s.Role == null || s.Progress == null) return ErrorCodes.Parameter;
         if (GuildId(s) is not { } id) return ErrorCodes.NotInGuild;
         guild = id;
-        if (!_functions.IsOpen(s, GuildFunction)) return ErrorCodes.FeatureUnavailable;
+        if (!_functions.IsOpen(s, GuildService.Function)) return ErrorCodes.FeatureUnavailable;
         if (s.SceneLoading || s.Handoff is { Completing: false } || s.SceneRecoveryRequired
             || s.SceneTransitionGate.CurrentCount == 0) return ErrorCodes.SwitchingScenes;
         if (s.InstanceId != 0 && s.SceneEntry == Scene && RoomOf(id)?.Id == s.InstanceId)

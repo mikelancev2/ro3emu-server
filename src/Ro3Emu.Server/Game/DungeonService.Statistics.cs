@@ -10,12 +10,12 @@ public sealed partial class DungeonService
         StatisticsCurrent = 30117, PlayerStatistics = 30123, TaskScore = 30126, QueryResult = 30128, ResultNotify = 30132;
 
     /// <summary>Real shared combat counters; zero task score until a recovered task-scoring rule exists.</summary>
-    private static DungeonStatisticsInfoWithDungeon StatisticsOf(Attempt a)
+    private DungeonStatisticsInfoWithDungeon StatisticsOf(Attempt a)
     {
         var result = new DungeonStatisticsInfoWithDungeon
         {
             StatisticsId = a.Room.Id,
-            DungeonId = (int)a.Plan.SceneEntry, StatisticsTime = MonsterService.NowMs
+            DungeonId = (int)a.Plan.SceneEntry, StatisticsTime = _loop.NowMs
         };
         var scene = new SceneStatisticsInfo { SceneId = a.Room.Id, DungeonId = (int)a.Plan.SceneEntry };
         foreach (var (id, stats) in a.Stats) scene.RoleStatistics[id] = stats.Clone();
@@ -23,20 +23,35 @@ public sealed partial class DungeonService
         return result;
     }
 
-    public Task StatisticsAsync(GameSession s)
+    /// <summary>
+    /// The role's newest persisted report (StoreHistory): what 30110/30116/30117 answer once the run's attempt is
+    /// gone. A team boss's result panel asks for the party statistics after the clear - and after the party has moved
+    /// on to the next boss - where the live attempt no longer exists.
+    /// </summary>
+    private static DungeonStatisticsInfoWithDungeon? NewestStored(GameSession s) =>
+        s.Dungeons is { Statistics.Count: > 0 } state
+            ? DungeonStatisticsInfoWithDungeon.Parser.ParseFrom(state.Statistics.MaxBy(entry => entry.Key).Value) : null;
+
+    /// <summary>30110's per-role rows of one report.</summary>
+    private static DungeonStatisticsInfo MapOf(DungeonStatisticsInfoWithDungeon stats)
     {
-        var response = new DungeonStatisticsRes { Result = s.DungeonAttempt == null ? ErrorCodes.SceneMissing : 0 };
-        if (s.DungeonAttempt is { } a)
-        {
-            var map = new DungeonStatisticsInfo { DungeonMapId = a.Plan.SceneEntry };
-            foreach (var value in a.Stats.Values)
+        var map = new DungeonStatisticsInfo { DungeonMapId = stats.DungeonId };
+        foreach (var scene in stats.SceneStatistics.Values)
+            foreach (var value in scene.RoleStatistics.Values)
                 map.DungeonRolesInfo.Add(new DungeonRoleInfo
                 {
                     RoleBase = new ObjScoreBaseInfo { Id = value.BaseInfo.Id, Name = value.BaseInfo.Name, Job = value.BaseInfo.Job, Area = 1 },
                     TotalDamage = value.TotalDamage, TotalBeDamage = value.TotalBeDamage, TotalCure = value.TotalCure, Totalscore = value.Totalscore,
                 });
-            response.DungeonRolesInfo[a.Room.Id] = map;
-        }
+        return map;
+    }
+
+    public Task StatisticsAsync(GameSession s)
+    {
+        var stored = s.DungeonAttempt == null ? NewestStored(s) : null;
+        var response = new DungeonStatisticsRes { Result = s.DungeonAttempt == null && stored == null ? ErrorCodes.SceneMissing : 0 };
+        if (s.DungeonAttempt is { } a) response.DungeonRolesInfo[a.Room.Id] = MapOf(StatisticsOf(a));
+        else if (stored != null) response.DungeonRolesInfo[stored.StatisticsId] = MapOf(stored);
         return s.SendGameAsync(Statistics, response);
     }
 
@@ -46,36 +61,44 @@ public sealed partial class DungeonService
     public Task StatisticsCurrentAsync(GameSession s)
     {
         var other = s.DungeonAttempt == null ? CurrentStatisticsOwner?.Invoke(s) : null;
+        // A cleared run's own attempt still answers while its members have not left the scene; after that the
+        // persisted report does, so the result panel's statistics survive the next boss.
+        var statistics = s.DungeonAttempt is { } a ? StatisticsOf(a) : other ?? NewestStored(s);
         return s.SendGameAsync(StatisticsCurrent, new GetDungeonStatisticsInDungeonResp
         {
-            Result = s.DungeonAttempt == null && other == null ? ErrorCodes.SceneMissing : 0,
-            DungeonStatistics = s.DungeonAttempt is { } a ? StatisticsOf(a) : other
+            Result = statistics == null ? ErrorCodes.SceneMissing : 0,
+            DungeonStatistics = statistics
         });
     }
 
     public Task StatisticsModuleAsync(GameSession s)
     {
-        var msg = new DungeonStatisticsModuleRsp { Result = s.DungeonAttempt == null ? ErrorCodes.SceneMissing : 0 };
-        if (s.DungeonAttempt is { } a)
+        var stored = s.DungeonAttempt == null ? NewestStored(s) : null;
+        var msg = new DungeonStatisticsModuleRsp { Result = s.DungeonAttempt == null && stored == null ? ErrorCodes.SceneMissing : 0 };
+        var stats = s.DungeonAttempt is { } a ? StatisticsOf(a) : stored;
+        if (stats != null)
         {
-            var stats = StatisticsOf(a);
             msg.StatisticsId = stats.StatisticsId; msg.DungeonId = stats.DungeonId; msg.StatisticsTime = stats.StatisticsTime;
             msg.SceneStatistics.Add(stats.SceneStatistics);
         }
         return s.SendGameAsync(StatisticsModule, msg);
     }
 
-    /// <summary>30114 only exposes the requesting role's persisted history or its own current instance.</summary>
+    /// <summary>30114 answers with the reports the role owns; a request may name several, and ids it does not own
+    /// (another party's run, or one already pruned) are left out instead of discarding the whole answer.</summary>
     public Task StatisticsHistoryAsync(GameSession s, DungeonStatisticsInfoWithDungeonReq req)
     {
         var msg = new DungeonStatisticsInfoWithDungeonResp();
         if (req.StaisticsIds.Count is 0 or > 20) msg.Result = ErrorCodes.Parameter;
-        else foreach (long id in req.StaisticsIds.Distinct())
+        else
         {
-            if (s.DungeonAttempt is { } a && a.Room.Id == id) msg.DungeonStatistics.Add(StatisticsOf(a));
-            else if (s.Dungeons?.Statistics.TryGetValue(id, out var bytes) == true)
-                msg.DungeonStatistics.Add(DungeonStatisticsInfoWithDungeon.Parser.ParseFrom(bytes));
-            else { msg.Result = ErrorCodes.NoPermission; msg.DungeonStatistics.Clear(); break; }
+            foreach (long id in req.StaisticsIds.Distinct())
+            {
+                if (s.DungeonAttempt is { } a && a.Room.Id == id) msg.DungeonStatistics.Add(StatisticsOf(a));
+                else if (s.Dungeons?.Statistics.TryGetValue(id, out var bytes) == true)
+                    msg.DungeonStatistics.Add(DungeonStatisticsInfoWithDungeon.Parser.ParseFrom(bytes));
+            }
+            if (msg.DungeonStatistics.Count == 0) msg.Result = ErrorCodes.NoPermission;
         }
         return s.SendGameAsync(StatisticsHistory, msg);
     }
@@ -91,13 +114,13 @@ public sealed partial class DungeonService
 
     private static string ResultId(Attempt a) => a.Room.Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-    private static void StoreHistory(State state, Attempt a)
+    private void StoreHistory(State state, Attempt a)
     {
         state.Statistics[a.Room.Id] = StatisticsOf(a).ToByteArray();
         var result = new DBDungeonResultData
         {
             ResultId = ResultId(a), ServerId = 1, DungeonId = a.Room.Id,
-            DungeonEntryId = (int)a.Plan.SceneEntry, CreateTime = MonsterService.NowMs
+            DungeonEntryId = (int)a.Plan.SceneEntry, CreateTime = _loop.NowMs
         };
         // Mode-specific SecondResultType/ResultParam have no recovered ordinary-dungeon mapping.
         state.Results[result.ResultId] = result.ToByteArray();
@@ -122,7 +145,7 @@ public sealed partial class DungeonService
         var result = new DBDungeonResultData
         {
             ResultId = notice.ResultId, ServerId = 1, DungeonId = info.StatisticsId, DungeonEntryId = info.DungeonId,
-            CreateTime = MonsterService.NowMs, WinCamp = info.WinCamp,
+            CreateTime = _loop.NowMs, WinCamp = info.WinCamp,
         };
         result.MetaData.Add(info.MetaData);
         var snapshot = new DungeonSnapshotData

@@ -55,14 +55,19 @@ public sealed class RidingEffects : IGameTicker
         _buffs = buffs;
         _mounts = mounts;
         _ridingBuffs = AllRidingBuffs(data);
-        character.ExtraAttributes.Add(RideAttributes);
-        mounts.RideChanged.Add(SyncAsync);
-        mounts.RideChanged.Add(skills.AttackInputChangedAsync);
-        character.WornGearChanged.Add(skills.AttackInputChangedAsync);
+        character.ExtraAttributes.Subscribe(RideAttributes);
+        mounts.RideChanged.Subscribe(SyncAsync);
+        mounts.RideChanged.Subscribe(skills.AttackInputChangedAsync);
+        // A flying mount's take-off/landing buttons (SkillWheelMount1/2) come and go with its own ride, not with the
+        // normal attack AttackInputChangedAsync alone watches, so mounting or dismounting one always resyncs the wheel.
+        mounts.RideChanged.Subscribe(skills.SyncAsync);
+        skills.MountFlyWheel = s => MountService.FlySkills(data, s) is { } fly
+            ? (new() { SkillConfigId = fly.Up, Enable = true }, new() { SkillConfigId = fly.Down, Enable = true }) : null;
+        character.WornGearChanged.Subscribe(skills.AttackInputChangedAsync);
         // It touches only the loaded session's own buffs, inside the scene load's scope.
         scenes.AddOwnedAfterLoaded(SyncAsync);
-        skills.Learned.Add(SyncAsync);
-        character.JobChanged.Add(SyncAsync);
+        skills.Learned.Subscribe(SyncAsync);
+        character.JobChanged.Subscribe(SyncAsync);
     }
 
     /// <summary>Every buff riding can grant: the mounts' bind buffs and the two passives' rows of every level.</summary>
@@ -111,7 +116,7 @@ public sealed class RidingEffects : IGameTicker
     {
         if (s.Role is not { } role || s.Dead) return;
         var wanted = Wanted(s);
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         foreach (var stale in s.Buffs.Where(b => _ridingBuffs.Contains(b.ConfigId) && !wanted.Contains(b.ConfigId)).ToList())
             await _buffs.RemoveAsync(s, stale);
         foreach (int id in wanted)
@@ -123,7 +128,7 @@ public sealed class RidingEffects : IGameTicker
     {
         if (time.Now - _lastTick < TimeSpan.FromSeconds(1)) return;
         _lastTick = time.Now;
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         foreach (var s in _sessions.All())
         {
             if (s.Role is not { } role || s.Dead || s.SceneLoading || !CareerSpecialService.IsLeasedMount(s, WolfMount)

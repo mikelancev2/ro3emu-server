@@ -24,7 +24,7 @@ public sealed class CardProgressTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = http;
             o.MicroGatePort = micro;
             o.GameGatePort = game;
@@ -37,7 +37,6 @@ public sealed class CardProgressTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -108,7 +107,12 @@ public sealed class CardProgressTests : IAsyncLifetime
         try
         {
             var exchange = loop.InvokeAsync(() => _app.Services.GetRequiredService<CharacterService>()
-                .ExchangeAsync(session, [], [(Lunatic, 1)], popup: false, sync: false));
+                .ExchangeAsync(session, new ExchangeRequest
+                {
+                    Goods = [(Lunatic, 1)],
+                    Popup = false,
+                    Sync = false,
+                }));
             Assert.True(await Task.Run(() => entered.Wait(Wait)));
             Assert.False(exchange.IsCompleted);
             Assert.False(await loop.InvokeAsync(() => Task.FromResult(session.Items.Any(i => i.Entry == Lunatic))));
@@ -175,17 +179,13 @@ public sealed class CardProgressTests : IAsyncLifetime
             Interlocked.Increment(ref callbacks);
             return Task.FromException(new InvalidOperationException("injected collection failure"));
         };
-        cards.CollectionChanged.Add(failing);
-        try
-        {
-            await alice.SendGameAsync(CardService.LibraryCardUnlock, new LibraryCardUnlockReq { CardId = Lunatic, IsTreasure = true });
-            Assert.Equal(0, (await Next(alice, CardService.LibraryCardUnlock, LibraryCardUnlockResp.Parser)).Result);
-            Assert.Equal(1, Volatile.Read(ref callbacks));
-            var bytes = _app.Services.GetRequiredService<RoleStore>().LoadLibrary((long)alice.Self!.Uuid);
-            Assert.NotNull(bytes);
-            Assert.True(DBLibraryInfo.Parser.ParseFrom(bytes).Cards[Lunatic].TreasureUnlock);
-        }
-        finally { cards.CollectionChanged.Remove(failing); }
+        using var failSub = cards.CollectionChanged.Subscribe(failing);
+        await alice.SendGameAsync(CardService.LibraryCardUnlock, new LibraryCardUnlockReq { CardId = Lunatic, IsTreasure = true });
+        Assert.Equal(0, (await Next(alice, CardService.LibraryCardUnlock, LibraryCardUnlockResp.Parser)).Result);
+        Assert.Equal(1, Volatile.Read(ref callbacks));
+        var bytes = _app.Services.GetRequiredService<RoleStore>().LoadLibrary((long)alice.Self!.Uuid);
+        Assert.NotNull(bytes);
+        Assert.True(DBLibraryInfo.Parser.ParseFrom(bytes).Cards[Lunatic].TreasureUnlock);
     }
 
     [ClientDataFact]
@@ -680,13 +680,5 @@ public sealed class CardProgressTests : IAsyncLifetime
         await Settled();
         await alice.SendGameAsync(CardService.LibraryCardUnlock, new LibraryCardUnlockReq { CardId = Lunatic });
         Assert.Equal(ErrorCodes.AlreadyUnlocked, (await Next(alice, CardService.LibraryCardUnlock, LibraryCardUnlockResp.Parser)).Result);
-    }
-
-
-    private static string RepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "data"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new DirectoryNotFoundException("repo data");
     }
 }

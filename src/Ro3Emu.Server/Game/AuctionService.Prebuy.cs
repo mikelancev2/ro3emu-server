@@ -17,7 +17,7 @@ public sealed partial class AuctionService
     /// </summary>
     private async Task<int> SetPrebuyAsync(GameSession s, AuctionType type, int src, int entry, long target)
     {
-        if (s.Role == null || entry <= 0 || target < 0 || target > Math.Max(1, Param("AUCTION_BATCH_NUM", 100)))
+        if (s.Role == null || entry <= 0 || target < 0 || target > Math.Max(1, (Data.Config.PublicParams.Of(data).AUCTIONBATCHNUM ?? 100)))
             return ErrorCodes.AuctionParameter;
         src = RowSrc(type, src);
         long requestRole = s.Role.Id;
@@ -58,9 +58,9 @@ public sealed partial class AuctionService
     internal async Task ProcessPrebuysAsync()
     {
         if (!loop.IsOnLoop) { await loop.InvokeAsync(ProcessPrebuysAsync); return; }
-        foreach (long id in store.Prebuys().Select(order => order.Id).ToArray())
+        foreach (long id in (await store.PrebuysAsync()).Select(order => order.Id).ToArray())
             await ProcessPrebuyAsync(id);
-        foreach (long id in store.OpenItems().Where(row => row.State == AuctionState.Public && row.Start <= Now)
+        foreach (long id in (await store.OpenItemsAsync()).Where(row => row.State == AuctionState.Public && row.Start <= Now)
             .Select(row => row.Id).ToArray())
         {
             AuctionStore.Item? opened = null;

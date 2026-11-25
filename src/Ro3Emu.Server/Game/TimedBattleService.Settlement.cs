@@ -15,7 +15,7 @@ public sealed partial class TimedBattleService
     /// <summary>The frozen grants of a settlement (timed_battle_obligation) on the shared obligation plans. Delivery
     /// stays this service's own: each row is paid under its role and row reservation right after the settlement
     /// commit, and at login (the role select reserves the pending rows, <see cref="LoginKeysAsync"/>).</summary>
-    private static class Obligations
+    internal static class Obligations
     {
         internal static ReservationKey Key(string source) => RoleObligations<TimedBattleObligationRow>.Key(source);
         internal static DbPlan CreatePlan(IEnumerable<TimedBattleObligationRow> rows) =>
@@ -155,10 +155,11 @@ public sealed partial class TimedBattleService
                     delta = next.DragonScore - oldScore;
                     long today = TreasureDay();
                     if (next.DragonCurrencyDay != today) { next.DragonCurrencyDay = today; next.DragonCurrencyEarned = 0; }
-                    int cap = (int)Math.Max(0, Math.Min(PublicValue("DragonIslandCurrencyLimit"),
+                    var p = Data.Config.PublicParams.Of(_data);
+                    int cap = (int)Math.Max(0, Math.Min(p.DragonIslandCurrencyLimit ?? 0,
                         level is { } capRow ? GameData.Int(capRow, "_iSettleCurrencyLimit") : int.MaxValue));
-                    int currency = actualVictory ? (int)PublicValue(won
-                        ? "DragonIslandCurrencyBaseWin" : "DragonIslandCurrencyBaseLose") : 0;
+                    int currency = actualVictory
+                        ? (int)((won ? p.DragonIslandCurrencyBaseWin : p.DragonIslandCurrencyBaseLose) ?? 0) : 0;
                     currency = Math.Clamp(currency, 0, Math.Max(0, cap - next.DragonCurrencyEarned));
                     next.DragonCurrencyEarned += currency;
                     if (currency > 0) grants.Add(new AwardGrant(6, currency));
@@ -228,7 +229,7 @@ public sealed partial class TimedBattleService
                 }).ToArray();
                 tx.WithEventEconomy(new EventEconomyMutation(catalog, Guid.NewGuid().ToString("N"),
                     "realm", 0, "event/timed-battle-settle", $"timed-battle/match/{match.Room.Id}",
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), debits, goods, deltas,
+                    _loop.NowMs, debits, goods, deltas,
                     JsonSerializer.SerializeToUtf8Bytes(new { Match = match.Room.Id, Recipients = frozen.Select(x => x.Obligation.RoleId).ToArray() })));
             }
             await _roles.CommitAsync(tx, "timed-battle/settlement", _ =>
@@ -314,7 +315,7 @@ public sealed partial class TimedBattleService
         _pendingDeliveryRoles.Remove(roleId);
     }
 
-    private async Task DeliverOneAsync(GameSession session, TimedBattleObligationRow obligation)
+    internal async Task DeliverOneAsync(GameSession session, TimedBattleObligationRow obligation)
     {
         var grants = JsonSerializer.Deserialize<AwardGrant[]>(obligation.Grants)
             ?? throw new InvalidDataException("Invalid frozen timed battle grants.");

@@ -22,6 +22,7 @@ public sealed partial class GuildCampfireService : IGameTicker
     public const uint Lucky = 83240, Stage = 83241, Info = 83242, Accelerant = 83243,
         PlayerInfo = 83244, Fruit = 83245, Hurray = 83246, BossDead = 83247, Finish = 83248;
     public const long Dungeon = 4000101;
+    public const int Function = 1321; // FunctionConfig: Bonfire Party
     /// <summary>
     /// Guild seed NPC UIDs: [2^48, 2^49), below 2^53 because the client's interaction scan keeps unit ids in a double
     /// array (LC_InteractManager m_kShareMemory; see DungeonService.SceneActorUidBase). The room part is the low 24
@@ -58,12 +59,12 @@ public sealed partial class GuildCampfireService : IGameTicker
 
     /// <summary>A member in the guild home while the Bonfire Party runs, once per event day (quest target 106018);
     /// listeners post their work.</summary>
-    public List<Action<GameSession>> Joined { get; } = [];
+    public SyncHook<GameSession> Joined { get; } = new("GuildCampfireService.Joined");
 
     private void MarkJoined(GameSession session)
     {
         if (session.Role is { } role && _joined.Add((role.Id, Today())))
-            foreach (var handler in Joined) handler(session);
+            foreach (var handler in Joined.Handlers) handler(session);
     }
 
     public GuildCampfireService(GameData data, AccountStore accounts, CharacterService character, BuffService buffs,
@@ -76,8 +77,8 @@ public sealed partial class GuildCampfireService : IGameTicker
         this._functions = functions; this._schedule = schedule; this._clock = clock; this._time = time;
         this._instances = instances; this._maps = maps; this._combat = combat;
         this._loop = loop; this._home = home;
-        scene.Loaded.Add(LoadedAsync);
-        combat.Killed.Add(KilledAsync);
+        scene.Loaded.Subscribe(LoadedAsync);
+        combat.Killed.Subscribe(KilledAsync);
     }
 
     private sealed class StateData
@@ -183,7 +184,7 @@ public sealed partial class GuildCampfireService : IGameTicker
     private bool Eligible(GameSession session) => session.ActivitiesReady && GuildId(session) != null && session.Progress != null
         && _data.Row("DailyActivityConfig", 116) is { } daily
         && session.Progress.Level >= GameData.Int(daily, "_iiLv")
-        && _functions.IsOpen(session, 1321);
+        && _functions.IsOpen(session, Function);
 
     private static long Uid(InstanceService.Room room, int point) =>
         UidPrefix | ((room.Id & 0xFFFFFFL) << 12) | (uint)point;
@@ -206,8 +207,7 @@ public sealed partial class GuildCampfireService : IGameTicker
     private IReadOnlyList<SpawnPoint> SeedPoints() => _maps.Map(Dungeon)?.SpawnGroups
         .FirstOrDefault(g => g.Id == 22)?.Points.OrderBy(p => p.Id).ToArray() ?? [];
 
-    private int MaxSeeds() => _data.Table("PublicParamConfig").TryGetValue("CampfireMaxSeedNum", out var value)
-        ? Math.Clamp((int)(GameData.Number(value) ?? 20), 1, 20) : 20;
+    private int MaxSeeds() => Math.Clamp((int)(Data.Config.PublicParams.Of(_data).CampfireMaxSeedNum ?? 20), 1, 20);
 
     private (int Template, MapPoint Position)? SeedAt(int pointId)
     {
@@ -559,8 +559,7 @@ public sealed partial class GuildCampfireService : IGameTicker
         var points = SeedPoints();
         if (points.Count == 0) return;
         int killed = Read(guild).FruitKills.GetValueOrDefault(stage);
-        int cap = _data.Table("PublicParamConfig").TryGetValue("CampfireMonsterLimit", out var limit)
-            ? Math.Clamp((int)(GameData.Number(limit) ?? 10), 1, plan.Count) : Math.Min(10, plan.Count);
+        int cap = Math.Clamp((int)(Data.Config.PublicParams.Of(_data).CampfireMonsterLimit ?? 10), 1, plan.Count);
         _fruitCreated[(room.Id, stage)] = 0;
         _fruitInitialKills[(room.Id, stage)] = killed;
         for (int i = 0; i < Math.Min(cap, plan.Count - killed); i++)

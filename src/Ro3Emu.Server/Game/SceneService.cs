@@ -26,23 +26,27 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
     /// <summary>How far the player may stand from an NPC it talks to (NPCConfig._iInteractDistance is 2-4; client positions lag).</summary>
     private const float InteractSlack = 8f;
 
+    public const int LeaveOrderCombat = -200;
+    public const int LeaveOrderTowerPets = -100;
+    public const int LeaveOrderInstance = -50;
+
     /// <summary>Dungeon owners clean up on every exit and start combat only after the loaded-scene handshake.</summary>
-    public List<Func<GameSession, Task>> Leaving { get; } = [];
+    public AsyncHook<GameSession> Leaving { get; } = new("Scene.Leaving");
     /// <summary>Reconcile destination-dependent appearance before ENTITYSELF and the first AOI snapshot.</summary>
-    public List<Func<GameSession, Task>> BeforeSelf { get; } = [];
-    public List<Func<GameSession, Task>> Loaded { get; } = [];
+    public AsyncHook<GameSession> BeforeSelf { get; } = new("Scene.BeforeSelf");
+    public AsyncHook<GameSession> Loaded { get; } = new("Scene.Loaded");
     /// <summary>Replays require the entity bases installed by JoinAsync.</summary>
-    public List<Func<GameSession, Task>> AfterLoaded { get; } = [];
+    public AsyncHook<GameSession> AfterLoaded { get; } = new("Scene.AfterLoaded");
     private readonly HashSet<Func<GameSession, Task>> _ownedAfterLoaded = [];
     /// <summary>Shared keys a loaded hook writes for this session (a hook that writes beyond the role declares them
     /// here when it registers).</summary>
-    public List<Func<GameSession, Ownership.ReservationKey[]>> LoadedKeys { get; } = [];
+    public OrderedHook<Func<GameSession, Ownership.ReservationKey[]>> LoadedKeys { get; } = new("Scene.LoadedKeys");
 
     /// <summary>C/D 15: the loaded hooks and unowned after-loaded hooks reserve the role's own keys plus what the hooks
     /// declare, not Realm. SceneHookScopeAuditTests guards that nothing else is needed.</summary>
     private Ownership.ReservationKey[] HookKeys(GameSession s) =>
         [.. s.Role is { } role ? new[] { Ownership.ReservationKey.Role(role.Id), Ownership.ReservationKey.Lifecycle(role.Id) } : [],
-            .. LoadedKeys.SelectMany(keys => keys(s))];
+            .. LoadedKeys.Handlers.SelectMany(keys => keys(s))];
 
     /// <summary>Declared keys follow session and shared state (escort membership, guild, season), which may change
     /// while the hooks wait: re-admit until the admitted reservation still covers them.</summary>
@@ -57,7 +61,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
     }
     /// <summary>Keep the original hook order while an opted-in hook admits its own participants.</summary>
     internal void AddOwnedAfterLoaded(Func<GameSession, Task> handler)
-    { AfterLoaded.Add(handler); _ownedAfterLoaded.Add(handler); }
+    { AfterLoaded.Subscribe(handler); _ownedAfterLoaded.Add(handler); }
     public Func<GameSession, WorldNpc, NpcInteractionReq, int>? ValidateInteraction { get; set; }
     public Func<GameSession, WorldNpc, NpcInteractionReq, Task>? ApplyInteraction { get; set; }
     /// <summary>Optional source-bound work begins only when capacity is granted for the actual handoff.</summary>
@@ -65,7 +69,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         Func<GameSession, bool>? Valid = null);
     public Func<GameSession, long, MapPoint?, int, TransferStart?, Task<bool>>? QueuePublicAdmission { get; set; }
     public Func<GameSession, long, int>? PreferredLine { get; set; }
-    public List<Action<RuntimeMapKey>> PublicLineOpened { get; } = [];
+    public SyncHook<RuntimeMapKey> PublicLineOpened { get; } = new("Scene.PublicLineOpened");
 
     /// <summary>
     /// Sends the player to <paramref name="scene"/> at <paramref name="at"/> (default: the map's born point). Walks are
@@ -137,7 +141,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
             throw;
         }
         var destination = reservation?.Map ?? RuntimeMapKey.Private(scene, instanceId);
-        var handoff = new SceneHandoff(++s.SceneGeneration, destination, clock.GetUtcNow().AddSeconds(30), reservation)
+        var handoff = new SceneHandoff(++s.SceneGeneration, destination, clock.GetUtcNow().AddSeconds(LoadTimeoutSeconds), reservation)
         { AdmissionValid = transfer?.Valid };
         s.Handoff = handoff;
         bool CurrentTransfer() => s.Handoff == handoff && !s.SceneRecoveryRequired
@@ -145,7 +149,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
             && lease?.Cancelled != true && handoff.AdmissionValid?.Invoke(s) != false;
         try
         {
-            foreach (var handler in Leaving) await handler(s);
+            await Leaving.InvokeAsync(s);
             await world.LeaveAsync(s, () => s.Handoff == handoff && ReferenceEquals(s.Role, role)
                 && ReferenceEquals(s.Attachment, lease) && lease?.Cancelled != true);
             if (!CurrentTransfer())
@@ -163,12 +167,12 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
             s.Position = new Vec3 { X = arrival.X, Y = arrival.Y, Z = arrival.Z };
             s.PreviousPosition = s.Position;
             s.Face = arrival.Face;
-            s.LastWalkUtc = DateTime.UtcNow; // the walk before the switch is over (GameSession.WalkReportLag)
+            s.LastWalkUtc = clock.GetUtcNow().UtcDateTime; // the walk before the switch is over (GameSession.WalkReportLag)
             s.Walking = false;
             s.SceneLoading = true;
             if (instanceId == 0)
             {
-                foreach (var opened in PublicLineOpened) opened(destination);
+                PublicLineOpened.Invoke(destination);
                 await monsters.EnsureSpawnedAsync(destination);
                 if (!CurrentTransfer())
                 {
@@ -257,7 +261,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         try
         {
             s.SceneLoading = false;
-            foreach (var handler in BeforeSelf)
+            foreach (var handler in BeforeSelf.Handlers)
             {
                 await handler(s);
                 // An opted-in private-room return can wait for death publication. A newer handoff owns its own 30005/ENTITYSELF.
@@ -291,7 +295,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
                     await s.SendGameAsync(GameAoiSink.SyncAoiView, new AoIViewChangeData());
                     if (!CurrentScene() || s.SceneLoading) return;
                 }
-                foreach (var handler in Loaded)
+                foreach (var handler in Loaded.Handlers)
                 {
                     await handler(s);
                     if (!CurrentScene() || s.SceneLoading) return;
@@ -300,7 +304,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
                 if (!CurrentScene() || s.SceneLoading) return;
                 if (handoff!.Reservation is { } loadedReservation) lines.Release(s, loadedReservation);
             }
-            foreach (var handler in AfterLoaded)
+            foreach (var handler in AfterLoaded.Handlers)
             {
                 using var hookScope = !_ownedAfterLoaded.Contains(handler) && s.Owners is { } hookOwners
                     ? await EnterHooksAsync(hookOwners, "scene after-loaded hook", s) : null;
@@ -320,7 +324,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
 
     /// <summary>Presentation-only replays after a silent reconnect (map-scoped views a service pushes in
     /// <see cref="Loaded"/>). Unlike Loaded/AfterLoaded they must not persist anything.</summary>
-    public List<Func<GameSession, Task>> Resync { get; } = [];
+    public AsyncHook<GameSession> Resync { get; } = new("Scene.Resync");
 
     /// <summary>
     /// The scene part of the silent-reconnect resync, after 1011: the own actor, its buffs,
@@ -341,7 +345,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         await s.SendGameAsync(GameAoiSink.SyncAoiView, view);
         if (!current()) return;
         await world.ReplayViewAsync(s, current);
-        foreach (var handler in Resync)
+        foreach (var handler in Resync.Handlers)
         {
             if (!current()) return;
             await handler(s);
@@ -349,7 +353,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
     }
 
     /// <summary>EntityBase of a server NPC: entity type 2, NPCConfig id as template, scene-editor position.</summary>
-    public static EntityBase NpcEntity(WorldNpc npc) => new()
+    public static EntityBase NpcEntity(WorldNpc npc, long? nowMs = null) => new()
     {
         Uuid = (ulong)npc.Uid,
         EntityTemplateID = (ulong)npc.NpcId,
@@ -361,7 +365,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         {
             Pos = new Vec3 { X = npc.X, Y = npc.Y, Z = npc.Z },
             Face = npc.Face,
-            ServerTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ServerTime = nowMs ?? TimeProvider.System.GetUtcNow().ToUnixTimeMilliseconds(),
         },
         NotifyType = EntityBase.Types.NotifyType.All,
     };
@@ -478,8 +482,9 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
     /// movement included (LC_Movement_AStarAgentNew -> LC_Movement_Smooth_Local -> LC_Movement_Smooth -> LC_Movement_Base).
     /// </summary>
     public bool MovesOnSurface(long sceneEntry) =>
-        sceneEntry != 0 && data.Table("PublicParamConfig").TryGetValue("NoviceDungeonReverseDungeonID", out var id)
-        && Data.GameData.Number(id) == sceneEntry;
+        sceneEntry != 0 && Data.Config.PublicParams.Of(data).NoviceDungeonReverseDungeonID == sceneEntry;
+
+    internal Func<GameSession, Task>? AfterTeleport { get; set; }
 
     /// <summary>
     /// Same-map teleport of the local player (MOVEMENT_CHANGE), then the watchers are told. (proven) The client applies
@@ -497,14 +502,15 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         {
             Uid = s.Role!.Id,
             TransType = MovesOnSurface(s.SceneEntry) ? MovementTransitionType.MoveTransResetPos : MovementTransitionType.MoveTransForceTeleport,
-            MovementInfo = new MovementInfo { Pos = pos, Face = at.Face, ServerTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+            MovementInfo = new MovementInfo { Pos = pos, Face = at.Face, ServerTime = clock.GetUtcNow().ToUnixTimeMilliseconds() },
         });
         s.PreviousPosition = s.Position;
         s.Position = pos;
         s.Face = at.Face;
-        s.LastWalkUtc = DateTime.UtcNow;
+        s.LastWalkUtc = clock.GetUtcNow().UtcDateTime;
         s.Walking = false;
         await world.MoveAsync(s, new WalkReq { Pos = pos, Face = at.Face, BStop = true, SpeedRate = 1 }, forceTeleport: true);
+        if (AfterTeleport != null) await AfterTeleport(s);
     }
 
     /// <summary>Set by TerritoryWarsService: whether a walk from a point to another crosses an air wall its dungeon has

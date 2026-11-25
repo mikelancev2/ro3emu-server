@@ -62,15 +62,15 @@ public sealed class StealthEffects : IGameTicker
         _world = world;
         _sessions = sessions;
         _loop = loop;
-        character.DynamicProperties.Add(Properties);
-        buffs.Changed.Add(PublishAsync);
+        character.DynamicProperties.Subscribe(Properties);
+        buffs.Changed.Subscribe(PublishAsync);
         scenes.AddOwnedAfterLoaded(PublishAsync);
-        skills.Learned.Add(PublishAsync);
-        character.JobChanged.Add(PublishAsync);
-        combat.CastLanded.Add(BackSlideCamouflageAsync);
-        combat.DealtAsync.Add((s, _, _, damage) => damage > 0 ? DealtAsync(s) : Task.CompletedTask);
-        combat.TakenAsync.Add((_, s, damage) => damage > 0 ? TakenAsync(s) : Task.CompletedTask);
-        combat.PvpDealtAsync.Add(async (source, target, damage, _) =>
+        skills.Learned.Subscribe(PublishAsync);
+        character.JobChanged.Subscribe(PublishAsync);
+        combat.CastLanded.Subscribe(BackSlideCamouflageAsync);
+        combat.DealtAsync.Subscribe((s, _, _, damage) => damage > 0 ? DealtAsync(s) : Task.CompletedTask);
+        combat.TakenAsync.Subscribe((_, s, damage) => damage > 0 ? TakenAsync(s) : Task.CompletedTask);
+        combat.PvpDealtAsync.Subscribe(async (source, target, damage, _) =>
         {
             if (damage <= 0) return;
             await TakenAsync(target);
@@ -112,7 +112,7 @@ public sealed class StealthEffects : IGameTicker
     /// <summary>The player's live buffs that end on damage: hiding (category 31) and Thief's Hiding, with their numbers.</summary>
     private List<(ActiveBuff Buff, BuffConfig Row)> Breakable(GameSession s)
     {
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         return [.. s.Buffs.Where(b => b.ExpireMs > now).Select(b => (Buff: b, Row: BuffConfig.Get(_data, b.ConfigId)))
             .Where(x => x.Row is { LogicData.Length: >= 3 } row && (CombatService.StealthBuff(row) || row.BuffId == HidingSpeedGroup))
             .Select(x => (x.Buff, x.Row!.Value))];
@@ -173,7 +173,7 @@ public sealed class StealthEffects : IGameTicker
     {
         if (time.Now - _lastTick < TimeSpan.FromMilliseconds(200)) return;
         _lastTick = time.Now;
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         foreach (var s in _sessions.All())
         {
             if (s.Role == null || s.Dead || s.SceneLoading
@@ -195,7 +195,7 @@ public sealed class StealthEffects : IGameTicker
     {
         if (s.Dead || !s.Buffs.Any(b => b.Guid == ruwach.Guid) || RuwachTarget(s, hit) is not { } target) return;
         long category = hit.LogicData.FirstOrDefault();
-        foreach (var buff in target.Buffs.Where(b => b.ExpireMs > MonsterService.NowMs).ToArray())
+        foreach (var buff in target.Buffs.Where(b => b.ExpireMs > _loop.NowMs).ToArray())
             if (BuffConfig.Get(_data, buff.ConfigId) is { } row && row.BuffCategory.Contains(category)
                 && target.Buffs.Any(b => b.Guid == buff.Guid))
             {

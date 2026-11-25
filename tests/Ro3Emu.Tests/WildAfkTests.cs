@@ -28,7 +28,7 @@ public sealed class WildAfkTests : IAsyncLifetime
         var (hp, mp, gp) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = hp; o.MicroGatePort = mp; o.GameGatePort = gp;
         });
         Service<SeasonService>().SetPlayBook(101);
@@ -41,7 +41,6 @@ public sealed class WildAfkTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -277,8 +276,11 @@ public sealed class WildAfkTests : IAsyncLifetime
         Assert.Equal(info.CurrentSnapshot.All, saved.Info.CurrentSnapshot);
     }
 
-    [ClientDataFact]
-    public async Task ManualFieldKillUsesReducedExpAndBonusKillUsesConfiguredHigherTable()
+    [ClientDataTheory]
+    [InlineData(0, true, 207)]
+    [InlineData(10, true, 235)] // 207 + floor(207 * 14%)
+    [InlineData(11, false, 24)] // 21 + floor(21 * 16%)
+    public async Task FieldKillAppliesTheStatueOnlyInAutoBattle(int statueLevel, bool bonusTime, int expectedAutoExp)
     {
         await using var bot = await InWorld();
         await Eligible(bot);
@@ -309,12 +311,20 @@ public sealed class WildAfkTests : IAsyncLifetime
         }
 
         Assert.Equal(37, await State(bot, s => s.Progress!.Level));
+        await OnLoop(() =>
+        {
+            Session(bot).OdinStatue!.CurLv = statueLevel;
+            return Task.CompletedTask;
+        });
         int reduced = await KillYoyoAndReadExp(1);
         Assert.Equal(21, reduced); // NPCDropConfig env 0: item 100 x30, corrected by 70%.
+        if (!bonusTime)
+        {
+            await bot.SendGameAsync(WildAfkService.Pause, new PauseHighMultiplierTimeReq());
+            Assert.Equal(0, (await Next(bot, WildAfkService.Pause, PauseHighMultiplierTimeRsp.Parser)).Result);
+        }
         await Auto(bot, true);
-        int bonus = await KillYoyoAndReadExp(2);
-        Assert.Equal(207, bonus); // NPCDropConfig env 1: item 100 x296, same correction.
-        Assert.True(bonus > reduced);
+        Assert.Equal(expectedAutoExp, await KillYoyoAndReadExp(2));
     }
 
     private Task RunningClock(BotClient bot) => OnOwnedLoop(bot, "AFK running fixture", _ =>
@@ -883,14 +893,13 @@ public sealed class WildAfkTests : IAsyncLifetime
         var eligibilityReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var rewardSettled = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var trailingCalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        int rewardIndex = combat.BeforeKilled.FindIndex(h => h.Target is RewardService);
-        Assert.True(rewardIndex >= 0);
-        var originalRewardHandler = combat.BeforeKilled[rewardIndex];
-        combat.BeforeKilled[rewardIndex] = async (owner, monster) =>
-        {
-            try { await originalRewardHandler(owner, monster); rewardSettled.TrySetResult(null); }
-            catch (Exception error) { rewardSettled.TrySetResult(error); throw; }
-        };
+        using var rewardWrap = combat.BeforeKilled.WrapForTest(
+            h => h.Target is RewardService,
+            original => async (owner, monster) =>
+            {
+                try { await original(owner, monster); rewardSettled.TrySetResult(null); }
+                catch (Exception error) { rewardSettled.TrySetResult(error); throw; }
+            });
         Func<GameSession, MonsterUnit, Task> afterKill = (_, _) => { trailingCalled.TrySetResult(); return Task.CompletedTask; };
         rewards.QualifiesForBonus = (owner, monster) =>
         {
@@ -898,7 +907,7 @@ public sealed class WildAfkTests : IAsyncLifetime
             eligibilityReached.TrySetResult();
             return decision;
         };
-        combat.Killed.Add(afterKill);
+        using var afterKillSub = combat.Killed.Subscribe(afterKill);
 
         var killCaptured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var enterOldGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -986,8 +995,6 @@ public sealed class WildAfkTests : IAsyncLifetime
             if (initialGateHeld) oldAfk.Gate.Release();
             if (blockerAcquired && !blockerReleased) oldAfk.Gate.Release();
             rewards.QualifiesForBonus = originalEligibility;
-            combat.BeforeKilled[rewardIndex] = originalRewardHandler;
-            combat.Killed.Remove(afterKill);
         }
     }
 
@@ -1040,13 +1047,5 @@ public sealed class WildAfkTests : IAsyncLifetime
             if (grant != null) await grant.WaitAsync(Wait);
             if (exp != null) await exp.WaitAsync(Wait);
         }
-    }
-
-
-    private static string RepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "data", "config"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new DirectoryNotFoundException("repository data/config");
     }
 }

@@ -38,7 +38,7 @@ public sealed class AchievementTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
             o.GameGatePort = gamePort;
@@ -51,15 +51,7 @@ public sealed class AchievementTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
-    }
-
-    private static string RepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
     }
 
     private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
@@ -152,10 +144,10 @@ public sealed class AchievementTests : IAsyncLifetime
     }
 
     private EconomySnapshot Cut() => EconomySnapshotReader.Read(Service<AccountStore>().DatabasePath,
-        EconomyCatalog.Load(Path.Combine(RepoRoot(), "data")), "auto");
+        EconomyCatalog.Load(Path.Combine(ClientData.RepoRoot, "data")), "auto");
 
     private EconomyLedgerWindow Ledger(EconomySnapshot opening, EconomySnapshot closing) =>
-        EconomyLedgerReader.Read(Service<AccountStore>().DatabasePath, EconomyCatalog.Load(Path.Combine(RepoRoot(), "data")),
+        EconomyLedgerReader.Read(Service<AccountStore>().DatabasePath, EconomyCatalog.Load(Path.Combine(ClientData.RepoRoot, "data")),
             "auto", opening.Cut.CommitSequence!.Value, closing.Cut.CommitSequence!.Value);
 
     private DBRoleAchievementInfo Saved(long role) =>
@@ -558,7 +550,7 @@ public sealed class AchievementTests : IAsyncLifetime
         await Full(alice);
         var loop = Service<GameLoop>();
         // MVP settlement: once per online participant.
-        await OnLoop("Alice", s => { foreach (var handler in Service<MvpService>().ParticipantSettled) handler(s); });
+        await OnLoop("Alice", s => Service<MvpService>().ParticipantSettled.Invoke(s));
         await ReachedIncrement(alice, Mvp1);
         Assert.Equal([1], (await Info("Alice", 101100101))!.Scores);
 
@@ -568,7 +560,7 @@ public sealed class AchievementTests : IAsyncLifetime
         await OnLoop("Alice", s =>
         {
             s.Tower!.LayerConfID = floor20;
-            foreach (var handler in Service<TowerService>().FloorCleared) handler(s);
+            Service<TowerService>().FloorCleared.Invoke(s);
         });
         await ReachedIncrement(alice, Tower20);
         Assert.Equal(AchievementStatusType.Complete, (await Info("Alice", Tower5))!.Status);
@@ -580,7 +572,7 @@ public sealed class AchievementTests : IAsyncLifetime
             var s = Session("Alice");
             foreach (string key in new[] { "50101:1", "50101:2", "100101:1" })
                 s.Dungeons!.Records[key] = new DungeonService.Record { Passed = true };
-            foreach (var handler in Service<DungeonService>().Completed) await handler(s, 0, false);
+            await Service<DungeonService>().Completed.InvokeAsync(s, 0, false);
         });
         await Until("Alice", s => s.Achievements!.Infos.GetValueOrDefault(TeamBoss)?.Scores.SequenceEqual([1, 1, 0]) == true,
             "two of three bosses");

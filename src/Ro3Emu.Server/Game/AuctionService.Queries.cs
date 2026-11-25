@@ -110,7 +110,9 @@ public sealed partial class AuctionService
                             store.Prebuys().Where(p => p.Role == role && p.Paused))).Distinct()]))
                 {
                     rows = [.. store.OpenItems().Where(r => r.Owner == s.Role!.Id && r.Auto && r.AutoPaused
-                        && r.State == AuctionState.Bidding && r.End > Now)];
+                        && r.State == AuctionState.Bidding && r.End > Now)
+                        .Select(r => store.Get(r.Id)).OfType<AuctionStore.Item>()
+                        .Where(r => r.Owner == s.Role!.Id && r.Auto && r.AutoPaused && r.State == AuctionState.Bidding && r.End > Now)];
                     var orders = store.Prebuys().Where(p => p.Role == s.Role!.Id && p.Paused).ToArray();
                     if (rows.Length != 0 || orders.Length != 0)
                     {
@@ -275,7 +277,7 @@ public sealed partial class AuctionService
             await SendSessionAuctionAsync(s, requestRole, requestLease, BatchBid, res);
             return;
         }
-        if (req.BiddingItems.Count > Math.Max(1, Param("AUCTION_BATCH_NUM", 100)) || req.PreBuyNum < 0)
+        if (req.BiddingItems.Count > Math.Max(1, (Data.Config.PublicParams.Of(data).AUCTIONBATCHNUM ?? 100)) || req.PreBuyNum < 0)
             res.Result = ErrorCodes.AuctionParameter;
         else
         {
@@ -305,7 +307,7 @@ public sealed partial class AuctionService
         long requestRole = s.Role?.Id ?? 0;
         var requestLease = s.Attachment;
         var res = new BatchCancelBiddingAuctionRes { OptType = req.OptType };
-        if (req.AuctionIds.Count > Math.Max(1, Param("AUCTION_BATCH_NUM", 100))) res.Result = ErrorCodes.Parameter;
+        if (req.AuctionIds.Count > Math.Max(1, (Data.Config.PublicParams.Of(data).AUCTIONBATCHNUM ?? 100))) res.Result = ErrorCodes.Parameter;
         else
         {
             foreach (long id in req.AuctionIds.Distinct().Take(MaxBatchPerRequest))

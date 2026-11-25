@@ -280,9 +280,9 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         session.Position = new Vec3 { X = arrival.X, Y = arrival.Y, Z = arrival.Z };
         session.Face = arrival.Face;
         session.RolePositionReady = true;
-        session.LastWalkUtc = DateTime.UtcNow;
+        session.LastWalkUtc = clock.GetUtcNow().UtcDateTime;
         session.Speed = data.JobAttributes(role.Career).GetValueOrDefault(AttrSpeed, DefaultSpeed);
-        session.PositionSavedUtc = DateTime.UtcNow;
+        session.PositionSavedUtc = clock.GetUtcNow().UtcDateTime;
         session.DeferFunctionSync = true;
         session.DeferTaskSync = true;
         session.SkillProtocol = new();
@@ -366,21 +366,22 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         if (session.Dead || buffs.HasForbidden(session, ForbiddenState.Walk))
         {
             // The client cannot move now: what it reports later may not include distance covered meanwhile.
-            SceneService.HoldWalk(session, DateTime.UtcNow, walking: false);
+            SceneService.HoldWalk(session, clock.GetUtcNow().UtcDateTime, walking: false);
             return;
         }
-        // A skill's 31112 is moving the player: the client stops its walk and its perform agent puts the unit at the move's
+        // A skill's 31112 moved the player: the client stops its walk and its perform agent puts the unit at the move's
         // start and carries it to the end (LC_Scene_Sync._skillStartMove: StopMove, LC_PerformEffect_Agent.SkillStartMove).
-        // A walk that comes meanwhile was sent before the client had the move, or reports a point of it; taken, it put the
-        // server back where the move began, and the next walk from the landing was snapped back there (Rift Impact, whose
-        // move starts at its first attack point, 0 s). (inferred) It is dropped, without a correction.
-        if (MonsterService.NowMs < session.SkillMovedUntilMs) return;
+        // A walk sent before the client had the move, or the stop that StopMove sends from its start, can arrive up to a
+        // round trip later, well after a charge of 80-160 ms. Taken, it put the server back where the move began: viewers
+        // saw the player go back, and the next 31112 (startPos) or walk-check correction took the client there too.
+        // (inferred) Such a walk is dropped, without a correction (SkillCarry.Predates).
+        if (session.Carry is { } carry && carry.Predates(walk.Pos, (long)NowMs())) return;
         if (!await scene.AcceptWalkAsync(session, walk)) return;
         session.PreviousPosition = session.Position;
         session.Position = walk.Pos;
         session.Face = walk.Face;
         session.WalkDir = float.IsFinite(walk.Dir) ? walk.Dir : walk.Face;
-        session.LastWalkUtc = DateTime.UtcNow; // also when the walk check is off
+        session.LastWalkUtc = clock.GetUtcNow().UtcDateTime; // also when the walk check is off
         session.Walking = !walk.BStop && walk.SpeedRate > 0;
         positions.MarkDirty(session, urgent: walk.BStop); // C/D 18: written lazily, never on the loop
         await systems.MovedAsync(session, walk);
@@ -401,7 +402,7 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         if (session.Role is not { } role || session.InstanceId != 0) return;
         var p = session.Position;
         roles.SavePosition(role.Id, session.SceneEntry, p.X, p.Y, p.Z, session.Face);
-        session.PositionSavedUtc = DateTime.UtcNow;
+        session.PositionSavedUtc = clock.GetUtcNow().UtcDateTime;
         positions.Persisted(session); // a durable barrier: no older lazy capture may follow it
     }
 
@@ -474,11 +475,13 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     /// mode panel saves those defaults (_applyPCInteractDefault) only when the chosen mode differs from the one it opened
     /// with, and its close/timeout path (_returnCloseClock) never does: a role that keeps Classic that way has no
     /// KeyBoardInfo at all, keyboard movement on and mouse movement off, so no ground cell under the cursor and clicks do
-    /// not walk. Repairs only that exact gap (no KeyBoardInfo saved yet): a saved KeyBoardInfo, including one a player set
-    /// through the Button tab (UI_Sys_Setup_ButtonWidgetCtrl.m_bNowEnableMouseMove), is their own choice and is left alone.
-    /// The repair writes exactly ClientConfig.lua's PCInteractSetting.Nostalgic: EnableMouseMove true, EnableKeyboardMove
-    /// false, SelectBtn/MoveBtn LC_DAL_Setting._processGameMode's (eSelectTargetKey/eMouseMoveKey - 1) = 0 (enum_PCMouseBtn
-    /// Left), CameraMode its eCameraDragKey(2) != 1 branch = 0 (enum_PCCameraDragMode RightDrag). True when it repaired.
+    /// not walk. Such settings (absent or corrupt KeyBoardInfo only) get the Nostalgic defaults written
+    /// (G_ClientCfg.PCInteractSetting.Nostalgic, as _applyPCInteractDefault saves them, i.e. ClientConfig.lua's
+    /// PCInteractSetting.Nostalgic: EnableMouseMove true, EnableKeyboardMove false, SelectBtn/MoveBtn
+    /// LC_DAL_Setting._processGameMode's (eSelectTargetKey/eMouseMoveKey - 1) = 0 (enum_PCMouseBtn Left), CameraMode its
+    /// eCameraDragKey(2) != 1 branch = 0 (enum_PCCameraDragMode RightDrag)); any real save, including one a player set
+    /// through the Button tab (UI_Sys_Setup_ButtonWidgetCtrl.m_bNowEnableMouseMove) or turned mouse movement off, is
+    /// their own choice and is left untouched. True when it repaired.
     ///
     /// Also migrates the one prior bug of our own: for about an hour on 2026-11-08, between cb7cacc6 and e94bdc23,
     /// this same repair wrote the raw, un-adjusted Lua values (SelectBtn/MoveBtn 1, CameraMode 2) instead of the wire
@@ -494,14 +497,18 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         try { mode = GameModeSetting.Parser.ParseFrom(modeBytes); }
         catch (InvalidProtocolBufferException) { return false; }
         if (mode.GameMode != oldSchool) return false;
+        bool hasKeyBoard = settings.ClientSetting.TryGetValue((int)SettingType.KeyBoard, out var keyBytes);
         KeyBoardInfo? keys = null;
-        if (settings.ClientSetting.TryGetValue((int)SettingType.KeyBoard, out var keyBytes))
+        if (hasKeyBoard)
         {
             try { keys = KeyBoardInfo.Parser.ParseFrom(keyBytes); }
-            catch (InvalidProtocolBufferException) { return false; }
-            bool isOurOldBug = keys.SelectBtn == buggyRight && keys.MoveBtn == buggyRight && keys.CameraMode == buggyRightDrag;
-            if (!isOurOldBug) return false;
+            catch (InvalidProtocolBufferException) { keys = null; hasKeyBoard = false; }
         }
+        bool isOurOldBug = keys is { } k && k.SelectBtn == buggyRight && k.MoveBtn == buggyRight && k.CameraMode == buggyRightDrag;
+        // Repair only when no real KeyBoardInfo exists: absent, corrupt, or our own historical bug's exact signature.
+        // Any other saved KeyBoardInfo, including a player's own mouse-off choice, is left alone.
+        if (hasKeyBoard && !isOurOldBug) return false;
+
         settings.ClientSetting[(int)SettingType.KeyBoard] = new KeyBoardInfo
         {
             KeyBoardMode = oldSchool, EnableMouseMove = true, EnableKeyboardMove = false,
@@ -537,12 +544,13 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
             Name = role.Name,
             EntityCamp = session.EventFaction > 0 ? session.EventFaction : 1,
             TeamId = session.UnitTeamId,
+            GuildId = session.Guild?.GuildId ?? 0,
             Face = face,
             MovementInfo = new MovementInfo
             {
                 Pos = position.Clone(),
                 Face = face,
-                ServerTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ServerTime = session.NowMs,
             },
             NotifyType = EntityBase.Types.NotifyType.All,
         };

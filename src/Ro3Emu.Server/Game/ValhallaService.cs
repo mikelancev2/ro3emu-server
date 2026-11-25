@@ -3,6 +3,7 @@ using Google.Protobuf;
 using Romsg;
 using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 
 namespace Ro3Emu.Server.Game;
 
@@ -12,15 +13,15 @@ namespace Ro3Emu.Server.Game;
 /// with Einherjar Coins. 83490 enters a layer's dungeon (DungeonService runs it; the clear is recorded with its
 /// _iPassReward, see DungeonService.Obligations), 83491 prays, 5046 DBHeroicSpiritInfo shows both
 /// (lua-src Logic/Asset/LC_DAL_Valhalla.lua). The statue is role blob "heroic_spirit" (DBOdinStatue).
-/// Not done: the statue's attribute 4008 "Field Auto-Battle EXP Bonus" has no consumer in this server.
+/// The statue's cumulative Field Auto-Battle EXP Bonus is applied by RewardService.
 /// </summary>
-public sealed class ValhallaService
+public sealed partial class ValhallaService
 {
     public const uint Sync = 5046, Challenge = 83490, Pray = 83491;
     public const int Function = 96;
     // ErrorCodeConfig 7101-7108 (texts proven; which request answers which is inferred). 7107 is ErrorCodes.DungeonBusy.
     public const int ErrDone = 7101, ErrCoins = 7102, ErrNoLayer = 7103, ErrPrevious = 7104, ErrLevel = 7105, ErrConfig = 7108;
-    private const int GamePlayType = 23;
+    private const int GamePlayType = 23, FieldAutoBattleExp = 4008;
 
     private readonly GameData _data;
     private readonly DungeonCatalog _catalog;
@@ -35,15 +36,26 @@ public sealed class ValhallaService
     {
         this._data = data; this._catalog = catalog; this._dungeons = dungeons; this._character = character;
         this._functions = functions; this._tasks = tasks; this._roles = roles;
-        dungeons.Completed.Add(ClearedAsync);
+        dungeons.Completed.Subscribe(ClearedAsync);
     }
 
     /// <summary>PublicParamConfig HeroSpiritItemId (Einherjar Coin 2000001) and HeroSpiritItemExp (statue EXP per coin, 2).</summary>
-    private int CoinItem => Param("HeroSpiritItemId", 2000001);
-    private int ExpPerCoin => Math.Max(1, Param("HeroSpiritItemExp", 2));
+    private int CoinItem => (int)(Data.Config.PublicParams.Of(_data).HeroSpiritItemId ?? 2000001);
+    private int ExpPerCoin => Math.Max(1, (int)(Data.Config.PublicParams.Of(_data).HeroSpiritItemExp ?? 2));
 
-    private int Param(string key, int fallback) => _data.Table("PublicParamConfig").TryGetValue(key, out var row)
-        ? (int)(GameData.Number(row) ?? fallback) : fallback;
+    // HeroicSpiritLevelConfig._kAttributes gives each level's increment in ten-thousandths.
+    internal static Dictionary<long, long> FieldExpBonuses(GameData data)
+    {
+        Dictionary<long, long> rates = [];
+        long total = 0;
+        foreach (var row in HeroicSpiritLevelConfig.All(data).OrderBy(row => row.Level))
+        {
+            foreach (var (id, value) in row.Attributes)
+                if (id == FieldAutoBattleExp) total += (long)value;
+            rates[row.Level] = total;
+        }
+        return rates;
+    }
 
     // ------------------------------------------------------------------ state / 5046
 
@@ -159,12 +171,18 @@ public sealed class ValhallaService
         if (error == 0)
         {
             var saved = next!;
-            if (await _character.ExchangeLockedAsync(s, cost, [], popup: false, persist: tx =>
+            if (await _character.ExchangeLockedAsync(s, new ExchangeRequest
+            {
+                Cost = cost,
+                Popup = false,
+                Persist = tx =>
                 {
                     tx.RoleBlob(s.Role!.Id, "heroic_spirit", saved.ToByteArray());
                     tx.WithEconomy(_character.FamilyEconomy(s, "cd13b/valhalla-pray", cost, [],
                         new { saved.CurLv, saved.CurExp }));
-                }, committed: () => s.OdinStatue = saved) == null)
+                },
+                Committed = () => s.OdinStatue = saved,
+            }) == null)
                 error = ErrCoins;
         }
         await s.SendGameAsync(Pray, new HeroicSpiritPrayRes { Err = error });

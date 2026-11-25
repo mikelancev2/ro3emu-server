@@ -22,7 +22,7 @@ public sealed class SkillBuffTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
             o.GameGatePort = gamePort;
@@ -35,7 +35,6 @@ public sealed class SkillBuffTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -186,7 +185,7 @@ public sealed class SkillBuffTests : IAsyncLifetime
         await Next(alice, BuffService.ImmuneDeathNotify, PlayerOnEnterImmuneDeadNotify.Parser);
         await Run(() =>
         {
-            session.ImmuneDeathOffer = session.ImmuneDeathOffer! with { ExpiresMs = MonsterService.NowMs + 30000 };
+            session.ImmuneDeathOffer = session.ImmuneDeathOffer! with { ExpiresMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000 };
             return Task.CompletedTask;
         });
         var pending = session.ImmuneDeathOffer;
@@ -225,10 +224,43 @@ public sealed class SkillBuffTests : IAsyncLifetime
         Assert.False(session.Energy.ContainsKey(540001));
     }
 
-    private static string RepoRoot()
+    /// <summary>EnergyConfig 540001 recovers 1 every 7.5 s (_iAutoRecoverInterval 7500). Recovery changes only the role's own
+    /// meter, so its notice is the role's own job: as a realm job each one stopped the whole loop (#484).</summary>
+    [ClientDataFact]
+    public async Task AutoRecoveryReachesTheMeterWithoutARealmHold()
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "data", "config"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new DirectoryNotFoundException("Repository data/config");
+        await using var alice = await InWorld("Alice");
+        await Gm("alice", "!job 5400");
+        var session = Session("alice");
+        await Next(alice, BuffService.EnergyNotify, PlayerEnergyNotify.Parser, x => x.EnergyConfigId == 540001);
+        var skill = _app.Services.GetRequiredService<GameData>().Row("SkillConfig", 1530101)!.Value;
+        await Run(() => Buffs.SpendEnergyAsync(session, skill));
+        await Next(alice, BuffService.EnergyNotify, PlayerEnergyNotify.Parser, x => x.EnergyConfigId == 540001 && x.EnergyValue == 1);
+
+        var recovered = PlayerEnergyNotify.Parser.ParseFrom((await alice.Inbox.WaitAsync(e => e.IsGame(BuffService.EnergyNotify) &&
+            PlayerEnergyNotify.Parser.ParseFrom(e.Body) is { EnergyConfigId: 540001, EnergyValue: 2 }, TimeSpan.FromSeconds(15))).Body);
+        Assert.Equal((EPlayerEnergyChangeReason)1, recovered.ChangeReason);
+        Assert.Equal(2, session.Energy[540001].Value);
+        var loop = _app.Services.GetRequiredService<GameLoop>();
+        var report = System.Text.Json.JsonSerializer.SerializeToNode(
+            await loop.InvokeAsync(() => Task.FromResult(loop.Owners!.Snapshot())))!;
+        Assert.False(report["realmByOrigin"]!.AsObject().ContainsKey("timer/energy recovery send"), report.ToJsonString());
+    }
+
+    // #484: a role's buff that runs out was removed by a realm job, so every expiry stopped the whole loop.
+    [ClientDataFact]
+    public async Task AnExpiredBuffIsRemovedWithoutARealmHold()
+    {
+        await using var alice = await InWorld("Alice");
+        var session = Session("alice");
+        await Run(() => Buffs.AddAsync(session, 1120801, 300, session.Role!.Id));
+        long guid = (await Next(alice, BuffService.BuffUpdate, BuffUpdateNotify.Parser, x => x.Buffs.Any(b => b.ConfigId == 1120801)))
+            .Buffs.Single().BuffGuid;
+        Assert.Contains(guid, (await Next(alice, BuffService.BuffRemove, BuffRemoveNotify.Parser)).BuffGuids);
+        Assert.DoesNotContain(session.Buffs, b => b.Guid == guid);
+        var loop = _app.Services.GetRequiredService<GameLoop>();
+        var report = System.Text.Json.JsonSerializer.SerializeToNode(
+            await loop.InvokeAsync(() => Task.FromResult(loop.Owners!.Snapshot())))!;
+        Assert.False(report["realmByOrigin"]!.AsObject().ContainsKey("timer/buff expiration"), report.ToJsonString());
     }
 }

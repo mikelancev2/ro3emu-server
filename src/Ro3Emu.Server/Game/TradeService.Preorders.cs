@@ -20,7 +20,7 @@ public sealed partial class TradeService
         int code = await market.RunAsync(s, tx =>
         {
             saleMs = 0;
-            if (!functions.IsOpen(s, 2)) return ErrorCodes.FunctionLocked;
+            if (!functions.IsOpen(s, Function)) return ErrorCodes.FunctionLocked;
             if (req.TotalQuantity < 1 || req.Price < 1 || (long)req.Price * req.TotalQuantity != req.TotalPrice)
                 return ErrorCodes.TradeRequest;
             var listing = tx.Get<Listing>(Listings, req.SkuId);
@@ -31,7 +31,7 @@ public sealed partial class TradeService
                 || req.TotalQuantity > GameData.Int(row, "_iBuyLimit"))
                 return ErrorCodes.TradeQuantity;
             if (tx.All<PreorderRow>(Orders).Count(o => o.BuyerId == s.Role!.Id && o.Status == 0)
-                >= Public("TradePreMaxNum", 30)) return ErrorCodes.TradeQuantity;
+                >= (Data.Config.PublicParams.Of(data).TradePreMaxNum ?? 30)) return ErrorCodes.TradeQuantity;
             var buyer = tx.Role(s.Role!.Id);
             if (buyer.Currency.GetValueOrDefault(listing.Currency) < req.TotalPrice) return ErrorCodes.CurrencyShort;
             buyer.Currency[listing.Currency] -= req.TotalPrice;

@@ -318,7 +318,7 @@ public sealed partial class OwnerRegistry
                     Deferred++; deferred = true; DeferredForTest?.Invoke(origin);
                     blockedBy = BlockerLabel(keys);
                 }
-                await Reservations.Changed.WaitAsync(cancellation);
+                await Reservations.SignalFor(keys).WaitAsync(cancellation);
                 cancellation.ThrowIfCancellationRequested();
                 if (request?.RuntimeOnly == true) request.AssertRequest();
             }
@@ -480,7 +480,8 @@ public sealed partial class OwnerRegistry
     public object Snapshot() => new
     {
         conflicts = Reservations.Conflicts, deferred = Deferred, maxQueueAgeMs = MaxQueueAgeMs,
-        totalQueueWaitMs = TotalQueueWaitMs, realmScopes = RealmScopes, runtimeIntents = RuntimeIntents,
+        totalQueueWaitMs = TotalQueueWaitMs, realmScopes = RealmScopes, realmHoldBacks = Reservations.RealmHoldBacks,
+        runtimeIntents = RuntimeIntents,
         handovers = HandoverCount, handoverConflicts = HandoverConflicts, rolesInRecovery = RolesInRecovery, realmByOrigin = RealmByOrigin(), waitByOrigin = WaitByOrigin()
     };
 

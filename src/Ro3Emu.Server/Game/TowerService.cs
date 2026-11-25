@@ -20,6 +20,7 @@ public sealed partial class TowerService
     public const uint TowerSync = 5065, Start = 32801, End = 32802, SetPets = 32803, Sweep = 32804, Info = 32805;
     public const uint PetDeadState = 32809;
     public const uint FirstPassRange = 32807, ClaimFirstPass = 32808, DungeonInfo = 30401, LeaveDungeon = 30402;
+    public const int Function = 89, HallFunction = 5001; // FunctionConfig: Spirit Tower
 
     private readonly GameData _data;
     private long _nextPetUid = TowerPetUnit.UidBase;
@@ -59,14 +60,14 @@ public sealed partial class TowerService
         this._clock = clock;
         this._log = log;
         // Owner-bound pets must leave before InstanceService removes their owner (LC_Unit_Pet.Destroy).
-        scene.Leaving.Insert(scene.Leaving.IndexOf(instances.AbandonAsync), AbandonAsync);
-        scene.Loaded.Add(followers.RefreshAsync); // suppress the passive projection in tower; restore it on return
-        scene.Loaded.Add(LoadedAsync);
+        scene.Leaving.Subscribe(AbandonAsync, order: SceneService.LeaveOrderTowerPets);
+        scene.Loaded.Subscribe(followers.RefreshAsync); // suppress the passive projection in tower; restore it on return
+        scene.Loaded.Subscribe(LoadedAsync);
         RegisterSuppression();
-        combat.Killed.Add(KilledAsync);
-        combat.BeforeKilled.Insert(0, BeforeTerminalKillAsync);
-        combat.PlayerDied.Add(PlayerDiedAsync);
-        combat.TowerPetDied.Add(PetDiedAsync);
+        combat.Killed.Subscribe(KilledAsync);
+        combat.BeforeKilled.Subscribe(BeforeTerminalKillAsync, order: CombatService.BeforeKilledOrderTower);
+        combat.PlayerDied.Subscribe(PlayerDiedAsync);
+        combat.TowerPetDied.Subscribe(PetDiedAsync);
     }
 
     public sealed record Spawn(int NpcId, MapPoint Point, int DelayMs);
@@ -104,13 +105,25 @@ public sealed partial class TowerService
 
     private bool Open(GameSession s) => s.Role != null && s.Tower != null && s.Progress != null
         && s.SeasonState is { } state && state.SeasonId == _seasons.SeasonId && state.PlayBookId == _seasons.PlayBook
-        && _functions.IsOpen(s, 89) && _functions.IsOpen(s, 5001);
+        && _functions.IsOpen(s, Function) && _functions.IsOpen(s, HallFunction);
 
-    /// <summary>PetFloorConfig is an array. Lookup and sorting use its explicit _iID / _iFloor domains.</summary>
-    private List<JsonElement> Floors()
+    /// <summary>PetFloorConfig is an array. Lookup and sorting use its explicit _iID / _iFloor domains. Built once per
+    /// playbook (and per loaded table): achievements read a role's cleared floor on every probe, and filtering and sorting
+    /// the table there each time took most of their tick at 500 players (LoadTest S3).</summary>
+    private (int PlayBook, object Table, IReadOnlyList<JsonElement> Rows, Dictionary<long, JsonElement> ById)? _floors;
+
+    private IReadOnlyList<JsonElement> Floors() => FloorTable().Rows;
+
+    private (int PlayBook, object Table, IReadOnlyList<JsonElement> Rows, Dictionary<long, JsonElement> ById) FloorTable()
     {
         int playBook = _seasons.PlayBook;
-        return [.. _data.Table("PetFloorConfig").Values.Where(r => FitsPlayBook(r, playBook)).OrderBy(r => GameData.Int(r, "_iFloor"))];
+        var table = _data.Table("PetFloorConfig");
+        if (_floors is { } cached && cached.PlayBook == playBook && ReferenceEquals(cached.Table, table)) return cached;
+        List<JsonElement> rows = [.. table.Values.Where(r => FitsPlayBook(r, playBook)).OrderBy(r => GameData.Int(r, "_iFloor"))];
+        var byId = new Dictionary<long, JsonElement>();
+        foreach (var row in rows) byId.TryAdd(GameData.Int(row, "_iID"), row);
+        _floors = (playBook, table, rows, byId);
+        return _floors.Value;
     }
 
     /// <summary>LC_SeasonHelper.GetMultiverseFitSeason: empty/[0], explicit membership, or [minimum,-1].</summary>
@@ -122,16 +135,16 @@ public sealed partial class TowerService
         return books.EnumerateArray().Any(b => GameData.Number(b) == playBook);
     }
 
-    private JsonElement? Floor(long id) => Floors().Where(r => GameData.Int(r, "_iID") == id).Select(r => (JsonElement?)r).FirstOrDefault();
+    private JsonElement? Floor(long id) => FloorTable().ById.TryGetValue(id, out var row) ? row : null;
     private int Cleared(GameSession s) => Floor(s.Tower!.LayerConfID) is { } f ? (int)GameData.Int(f, "_iFloor") : 0;
 
     /// <summary>The highest Spirit Tower floor this role has cleared (PetFloorConfig._iFloor of its record), 0 without one.</summary>
     public int HighestClearedFloor(GameSession s) => s.Tower == null ? 0 : Cleared(s);
 
     /// <summary>After a committed floor clear is applied to the session (achievement 101014); listeners post their work.</summary>
-    public List<Action<GameSession>> FloorCleared { get; } = [];
+    public SyncHook<GameSession> FloorCleared { get; } = new("TowerService.FloorCleared");
     /// <summary>After a floor attempt's 32802 result, won or lost (quest targets 101007 / 101010); listeners post.</summary>
-    public List<Action<GameSession, bool>> Settled { get; } = [];
+    public SyncHook<GameSession, bool> Settled { get; } = new("TowerService.Settled");
     private Task SyncAsync(GameSession s) => CharacterService.SyncAsync(s, TowerSync, s.Tower!.Clone());
     private async Task SaveAsync(GameSession s, DBClimTower next)
     {
@@ -338,7 +351,7 @@ public sealed partial class TowerService
             DamageRatio = DifficultyRatio(floor.Value, 215, challengeMs, now),
             Suppressed = Suppress(s, floor.Value, hpRatio),
         };
-        if (ReferenceEquals(room, s.TowerAttempt?.Room)) await ResetFloorAsync(s, attempt);
+        if (ReferenceEquals(room, s.TowerAttempt?.Room)) await ResetFloorAsync(s, attempt, map!.Born!.Value);
         else
         {
             if (!await _instances.EnterAsync(room, s, reason: 4)) return;
@@ -357,15 +370,22 @@ public sealed partial class TowerService
     /// The next floor, a replay or Try Again from inside the tower: 30124 DungeonResetNtf on the same scene, then the
     /// floor starts as at a 30005. The client keeps its scene for it: LC_ClimbTowerHelper sends 32801 with
     /// isInClimTower and marks the current scene (SetPlayCameraFxOnInit, read by LC_DunGeon_ClimbTower at the next
-    /// 30401), and LC_Scene_Sync._dungeonResetNtf reloads the scene and raises Scene.ResetDungeon, where
-    /// LC_Actor_AutoAttack._resetScene keeps auto battle for DungeonConfig._kResetChangeAutoBattle [1, group] (2100001:
-    /// [1, 27]) and _refreshAutoPathCache walks a ClimbTower player to that spawn group. A 70010 switch would end it:
-    /// GameLogic's Unit.SwitchScene handler turns isAutoBattle off. The player keeps his position (inferred).
+    /// 30401), and LC_Scene_Sync._dungeonResetNtf reloads the scene and raises Scene.ResetDungeon. A 70010 switch would
+    /// end auto battle: GameLogic's Unit.SwitchScene handler turns isAutoBattle off.
+    /// <para>The reset alone leaves auto battle paused: LC_Actor_AutoAttack._resetScene, for
+    /// DungeonConfig._kResetChangeAutoBattle [1, point] (2100001: [1, 27], the 起始点 start point of
+    /// sc_pm_pata_001_dg01_sceneeditor), caches that point and calls PauseAutoAttack. Only _refreshAutoPathCache walks
+    /// there and resumes it on arrival (m_fFindPathBack = ResumeAutoAttack, bResetAnchor), and it runs on
+    /// Unit.LocalPlayerGridChange alone, which a walk across a grid (LC_Movement_AStarAgentNew) or a server move of the
+    /// controlled unit (LC_Scene_Sync._syncUnitMoveState, MOVEMENT_CHANGE) raises. So the player is put back on the
+    /// born point he entered on, with a same-map teleport after the 30124. The born point as the target is
+    /// (inferred); that the client needs a server move here is not.</para>
     /// </summary>
-    private async Task ResetFloorAsync(GameSession s, Attempt attempt)
+    private async Task ResetFloorAsync(GameSession s, Attempt attempt, MapPoint born)
     {
         s.TowerAttempt = attempt; // the settled floor's pending spawns and deadline lapse (Active)
         await s.SendGameAsync(DungeonService.Reset, new DungeonResetNtf());
+        await _scene.TeleportInMapAsync(s, born);
         await LoadedAsync(s);
     }
 
@@ -505,7 +525,7 @@ public sealed partial class TowerService
         settlement.Applied = () =>
         {
             s.Tower = next;
-            foreach (var handler in FloorCleared)
+            foreach (var handler in FloorCleared.Handlers)
                 try { handler(s); }
                 catch (Exception e) { _log.LogError(e, "Tower clear hook failed for {Role}", s.Role.Id); }
             var reward = new GetRewardNotify { TargetUid = s.Role.Id };
@@ -602,11 +622,11 @@ public sealed partial class TowerService
         {
             await SyncAsync(s);
             // A new cleared floor: quest targets read it (growth-manual 101014 CheckClimbTowerLayer).
-            foreach (var handler in _character.StateChanged) handler(s);
+            foreach (var handler in _character.StateChanged.Handlers) handler(s);
         }
         _log.LogInformation("{Name} tower floor {Floor}: {Won}, {Duration}s", s.Role!.Name, floor, won, duration);
         if (result == 0)
-            foreach (var handler in Settled)
+            foreach (var handler in Settled.Handlers)
                 try { handler(s, won); }
                 catch (Exception e) { _log.LogError(e, "Tower settlement hook failed for {Role}", s.Role.Id); }
     }
@@ -666,9 +686,15 @@ public sealed partial class TowerService
                 var economy = _character.EconomyForOwnedExchange(s, "cd13e/tower-milestone",
                     $"tower-milestone/{s.Role!.Id}/{previousWatermark}/{watermark}", [], goods,
                     new { Previous = previousWatermark, Claimed = watermark, Goods = goods.Select(g => new { g.Entry, g.Count }).ToArray() });
-                var granted = await _character.ExchangeLockedAsync(s, [], goods, popup: false, sync: false,
-                    persist: tx => tx.RoleBlob(s.Role.Id, "tower", next.ToByteArray()),
-                    committed: () => s.Tower = next, economy: economy);
+                var granted = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+                {
+                    Goods = goods,
+                    Popup = false,
+                    Sync = false,
+                    Persist = tx => tx.RoleBlob(s.Role.Id, "tower", next.ToByteArray()),
+                    Committed = () => s.Tower = next,
+                    Economy = economy,
+                });
                 if (granted == null) error = ErrorCodes.ItemsShort;
                 else
                 {

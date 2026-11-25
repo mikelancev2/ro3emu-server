@@ -17,6 +17,7 @@ public sealed class EnchantService(GameData data, CharacterService character, Fu
 
     private readonly ItemStore _items = items;
     public const uint Enchant = 31415;
+    public const int Function = 83; // FunctionConfig: equipment enchant
 
     /// <summary>
     /// function 7/83, appraisal, slots, scroll type, equipment position and star/level checks.
@@ -32,7 +33,7 @@ public sealed class EnchantService(GameData data, CharacterService character, Fu
         var scrollRow = scroll == null ? null : data.Row("ItemConfig", scroll.Entry);
         var enchantRow = scroll == null ? default : data.Table("Enchantment").Values.FirstOrDefault(r => Flat(r, "_iItem").Contains(scroll.Entry));
         int slots = gearRow is { } gear ? (int)GameData.Int(gear, "_iEnchantSlot") : 0;
-        int result = !functions.IsOpen(session, 7) || !functions.IsOpen(session, 83) ? ErrorCodes.FeatureUnavailable
+        int result = !functions.IsOpen(session, AppraisalService.EquipFunction) || !functions.IsOpen(session, Function) ? ErrorCodes.FeatureUnavailable
             : equip == null || scroll == null ? ErrorCodes.ItemMissing
             : gearRow is not { } g || GameData.Int(g, "_iType") != 5 ? ErrorCodes.NotEquipment
             : equip.Grid < 0 || equip.Stack != 1 ? ErrorCodes.EnchantParameter
@@ -60,14 +61,16 @@ public sealed class EnchantService(GameData data, CharacterService character, Fu
                 var candidate = equip!.Clone();
                 int installed = (int)GameData.Int(enchantRow, "_iID");
                 // (inferred) Monotonic Unix seconds preserve a definite display order even for rapid rerolls.
-                rolled.GetTime = Math.Max(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), candidate.Enchantments.Values.Select(e => e.GetTime).DefaultIfEmpty(0).Max() + 1);
+                rolled.GetTime = Math.Max(session.NowSec, candidate.Enchantments.Values.Select(e => e.GetTime).DefaultIfEmpty(0).Max() + 1);
                 if (replacement.Value != 0) candidate.Enchantments.Remove(replacement.Value);
                 candidate.Enchantments[installed] = rolled;
                 // No sync inside the exchange: the paid bag and updated item are published together below.
                 try
                 {
-                    if (await character.ExchangeLockedAsync(session, cost, [], new Dictionary<long, int> { [scroll!.Guid] = 1 }, popup: false, sync: false,
-                        persist: transaction =>
+                    if (await character.ExchangeLockedAsync(session, new ExchangeRequest
+                    {
+                        Cost = cost, Instances = new Dictionary<long, int> { [scroll!.Guid] = 1 }, Popup = false, Sync = false,
+                        Persist = transaction =>
                         {
                             transaction.WithEconomy(character.FamilyEconomy(session, "cd13a/enchant-apply",
                                 [.. cost, (scroll.Entry, 1L)], [],
@@ -76,7 +79,9 @@ public sealed class EnchantService(GameData data, CharacterService character, Fu
                                     Equip = equip.Guid, Scroll = scroll.Guid, Installed = installed,
                                     Replaced = replacement.Value, Attr = rolled.Attr, Time = rolled.GetTime
                                 }));
-                        }, stageItems: staged => staged.Single(i => i.Guid == equip.Guid).Enchantments = candidate.Enchantments) == null)
+                        },
+                        StageItems = staged => staged.Single(i => i.Guid == equip.Guid).Enchantments = candidate.Enchantments,
+                    }) == null)
                         result = ErrorCodes.EnchantMaterials;
                 }
                 catch (SqliteException e)
@@ -175,10 +180,8 @@ public sealed class EnchantService(GameData data, CharacterService character, Fu
     /// <summary>PublicParamConfig.EnchantStarsLevel (Config/ComplexConfig/PublicParamConfig.lua:5951-5995).</summary>
     private long StarLevel(long stars)
     {
-        if (data.Table("PublicParamConfig").TryGetValue("EnchantStarsLevel", out var levels) && levels.ValueKind == JsonValueKind.Array)
-            foreach (var pair in levels.EnumerateArray())
-                if (pair.ValueKind == JsonValueKind.Array && pair.GetArrayLength() == 2 && GameData.Number(pair[0]) == stars)
-                    return (long)(GameData.Number(pair[1]) ?? 0);
+        foreach (var pair in Data.Config.PublicParams.Of(data).EnchantStarsLevel ?? [])
+            if (pair.Length == 2 && pair[0] == stars) return pair[1];
         return 0;
     }
 

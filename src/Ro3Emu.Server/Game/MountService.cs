@@ -14,10 +14,11 @@ namespace Ro3Emu.Server.Game;
 /// LC_MountServer omits tp on 32743; zero therefore selects the system slot, not an invalid enum.
 /// Mount attributes use the normal StatCalculator pipeline, including per_speed 1131.
 /// </summary>
-public sealed class MountService : IGameTicker
+public sealed partial class MountService : IGameTicker
 {
     public const uint Sync = 5012, SetConfig = 32743, ScoreAward = 32744, Ride = 32745, Unlock = 32747;
     public const uint EtchantRefresh = 32748, EtchantSave = 32749, EtchantPlan = 32750;
+    public const int Function = 27; // FunctionConfig: Mount
     private readonly GameData _data;
     private readonly CharacterService _character;
     private readonly RoleStore _roles;
@@ -53,15 +54,16 @@ public sealed class MountService : IGameTicker
         WardrobeService wardrobe, CombatService combat)
     {
         this._wardrobe = wardrobe;
-        combat.BeforeCast = DismountForCastAsync;
+        combat.BeforeCast.Subscribe(DismountForCastAsync);
+        combat.GrantedSkill.Subscribe((s, id) => FlySkills(data, s) is { } fly && id == (s.WorldState.Flying ? fly.Down : fly.Up));
         this._data = data; this._character = character; this._roles = roles; this._functions = functions;
         this._world = world; this._loop = loop; this._sessions = sessions; this._deadlines = deadlines; this._clock = clock;
-        character.ExtraAttributes.Add(Attributes);
-        character.SpecialItemUse.Add(TryUseItemAsync);
-        character.ItemsAwarded.Add((s, items) => { if (items.Any(i => IsAutoUsedVoucher(i.Entry))) UseHeldVouchers(s); });
+        character.ExtraAttributes.Subscribe(Attributes);
+        character.SpecialItemUse.Subscribe(TryUseItemAsync);
+        character.ItemsAwarded.Subscribe((s, items) => { if (items.Any(i => IsAutoUsedVoucher(i.Entry))) UseHeldVouchers(s); });
         wardrobe.MountGrant = PlanShopGrant;
-        character.JobChanged.Add(ReconcileAsync);
-        scenes.BeforeSelf.Add(ReconcileAsync);
+        character.JobChanged.Subscribe(ReconcileAsync);
+        scenes.BeforeSelf.Subscribe(ReconcileAsync);
     }
 
     public void Load(GameSession s)
@@ -142,7 +144,7 @@ public sealed class MountService : IGameTicker
     internal Task PublishAsync(GameSession s) => ChangedAsync(s);
 
     /// <summary>After a committed 5012 change, the rider's stats sent (RidingEffects: the ridden mount's buffs).</summary>
-    internal List<Func<GameSession, Task>> RideChanged { get; } = [];
+    internal AsyncHook<GameSession> RideChanged { get; } = new("MountService.RideChanged");
 
     /// <summary>The ridden mount's _kBindBuff rows (CartRemouldTable or MountsConfig), and its CartRemouldTable
     /// _iSubType (2 Peco Peco, 4 wolf, 5 Madogear, 6 dragon, 7 gryphon; 0 for any other mount or none).</summary>
@@ -153,15 +155,30 @@ public sealed class MountService : IGameTicker
         return (MountsConfig.Get(_data, id) is { } mount ? mount.BindBuff : [], 0);
     }
 
+    /// <summary>WorldCoreService's landing of a flying rider, before a ride the server ends by itself (an expiry).</summary>
+    internal Func<GameSession, Task>? LandFlyingRider { get; set; }
+
     public static long Rider(GameSession s) => s.MountState.QuestMount != 0 ? s.MountState.QuestMount
         : s.Mounts?.MountIds.OrderBy(p => p.Key).FirstOrDefault(p => p.Value.IsRiding).Value?.MountId ?? 0;
+
+    /// <summary>
+    /// The flying mount ridden in the System slot (1): its MountsConfig._kFlySwitchSkills [take-off, landing].
+    /// LC_MountComponent.Ride marks the rider m_bRideFlyMount and aims these two skills on the HUD's skill wheel
+    /// (SkillWheelMount1 slot, JoyStickSkillNormalMixin). A quest ride has no System-slot entry, so it never flies.
+    /// </summary>
+    public static (int Up, int Down)? FlySkills(GameData data, GameSession s)
+    {
+        if (s.MountState.QuestMount != 0 || s.Mounts == null || !s.Mounts.MountIds.TryGetValue(SystemSlot, out var system)
+            || !system.IsRiding || MountsConfig.Get(data, system.MountId) is not { } mount) return null;
+        var skills = mount.FlySwitchSkills;
+        return skills is [> 0 and var up, > 0 and var down, ..] ? ((int)up, (int)down) : null;
+    }
 
     private IEnumerable<(long Id, double Value)> Attributes(GameSession s) =>
         Config((int)Rider(s)) is { } row ? GameData.Pairs(row, "_kAttr") : [];
 
     private JsonElement? Config(long id) => _data.Row("MountsConfig", id) ?? _data.Row("CartRemouldTable", id);
     private int Slot(long id) => _data.Row("MountsConfig", id) != null ? 1 : _data.Row("CartRemouldTable", id) != null ? 2 : 0;
-    private int Param(string name, int fallback) => _data.Table("PublicParamConfig").TryGetValue(name, out var v) ? (int)(GameData.Number(v) ?? fallback) : fallback;
     private long Now => _clock.GetUtcNow().ToUnixTimeMilliseconds();
 
     private void ArmExpiry(GameSession s)
@@ -219,7 +236,8 @@ public sealed class MountService : IGameTicker
     {
         using var gate = await CharacterService.Lock(s);
         int slot = (int)req.Tp == 0 ? 1 : (int)req.Tp;
-        int error = !_functions.IsOpen(s, 27) ? ErrorCodes.FunctionLocked : slot is < 1 or > 2 ? ErrorCodes.Parameter
+        int error = !_functions.IsOpen(s, Function) ? ErrorCodes.FunctionLocked : slot is < 1 or > 2 ? ErrorCodes.Parameter
+            : s.WorldState.Flying ? ErrorCodes.MountFlying
             : req.MountId != 0 && Slot(req.MountId) != slot ? ErrorCodes.MountConfig
             : req.MountId != 0 ? OwnedError(s, req.MountId) : 0;
         bool riding = s.Mounts!.MountIds.TryGetValue(slot, out var old) && old.IsRiding;
@@ -240,7 +258,8 @@ public sealed class MountService : IGameTicker
         int tp = (int)req.Tp, slot = tp < 2 ? 1 : 2;
         bool on = tp is 1 or 3;
         var selected = s.Mounts!.MountIds.GetValueOrDefault(slot);
-        int error = tp is < 0 or > 3 ? ErrorCodes.Parameter : on && !_functions.IsOpen(s, 27) ? ErrorCodes.FunctionLocked
+        int error = tp is < 0 or > 3 ? ErrorCodes.Parameter : s.WorldState.Flying ? ErrorCodes.MountFlying
+            : on && !_functions.IsOpen(s, Function) ? ErrorCodes.FunctionLocked
             : on ? OwnedError(s, selected?.MountId ?? 0) : 0;
         if (error == 0 && on) error = RidingError(s, selected!.MountId, slot);
         if (error == 0)
@@ -263,14 +282,16 @@ public sealed class MountService : IGameTicker
     /// CombatService.BeforeCast: a rider casts or attacks, so it gets off a system mount first, without refusing the cast.
     /// The client never sends the dismount itself (only an interaction skill does, UI_Sys_MainRoleSkillWidgetCtrl.lua:481-488)
     /// and holds a skill while its unit rides a system mount until the ride ends (LC_State_Unit_Skill.lua:51-71), so the
-    /// ride ends here, before the cast's timeline and hit. A battle mount is ridden into the fight, and a flying rider
-    /// keeps its mount (inferred). The caller holds the character lock.
+    /// ride ends here, before the cast's timeline and hit. A battle mount is ridden into the fight, a flying rider keeps
+    /// its mount (inferred), and so does either flight switch (<see cref="FlySkills"/>, WorldCoreService.
+    /// MountFlightSwitchAsync). The caller holds the character lock.
     /// </summary>
     /// <returns>The milliseconds the cast waits for the dismount to play, zero when nobody got off.</returns>
-    private async Task<int> DismountForCastAsync(GameSession s)
+    private async Task<int> DismountForCastAsync(GameSession s, int skillId)
     {
         long id = s.Mounts == null ? 0 : Rider(s);
-        if (id == 0 || Slot(id) != SystemSlot || s.WorldState.Flying) return 0;
+        if (id == 0 || Slot(id) != SystemSlot || s.WorldState.Flying
+            || FlySkills(_data, s) is { } fly && (skillId == fly.Up || skillId == fly.Down)) return 0;
         var next = s.Mounts!.Clone();
         if (next.MountIds.TryGetValue(SystemSlot, out var choice)) choice.IsRiding = false;
         var state = CopyState(s); state.QuestMount = 0;
@@ -301,13 +322,13 @@ public sealed class MountService : IGameTicker
     }
 
     /// <summary>After a committed 5012 change (ownership, riding): BuffService adds or drops mount energy meters.</summary>
-    public List<Func<GameSession, Task>> Changed { get; } = [];
+    public AsyncHook<GameSession> Changed { get; } = new("MountService.Changed");
 
     /// <summary>5012 after a committed change, then the <see cref="Changed"/> listeners.</summary>
     private async Task PublishOwnedAsync(GameSession s)
     {
         await LoginAsync(s);
-        foreach (var handler in Changed) await handler(s);
+        foreach (var handler in Changed.Handlers) await handler(s);
     }
 
     private async Task ChangedAsync(GameSession s)
@@ -315,7 +336,7 @@ public sealed class MountService : IGameTicker
         ArmExpiry(s);
         await PublishOwnedAsync(s);
         await _character.RefreshStatsAsync(s);
-        foreach (var handler in RideChanged) await handler(s);
+        foreach (var handler in RideChanged.Handlers) await handler(s);
         var entity = RoleSessionService.PlayerEntity(s);
         entity.NotifyType = EntityBase.Types.NotifyType.Rider;
         await s.SendGameAsync(CharacterService.EntityBaseChange, entity);
@@ -354,8 +375,12 @@ public sealed class MountService : IGameTicker
         using var gate = await CharacterService.Lock(s);
         if (!_deadlines.IsCurrent(s, lease) || s.Mounts == null) return;
         var next = s.Mounts.Clone();
+        if (!Normalize(s, next)) return;
+        // A flying rider whose mount expires is put down first: the client leaves a flight only through a landing it gets
+        // while it still rides; LC_MountComponent.GetDown exits the mount's 3C, not the flight (inferred).
+        if (s.WorldState.Flying && LandFlyingRider is { } land) await land(s);
         // A timed mount and its appearance share one deadline; drop both in the expiry commit.
-        if (Normalize(s, next)) await CommitAsync(s, next, look: _wardrobe.WithoutExpired(s));
+        await CommitAsync(s, next, look: _wardrobe.WithoutExpired(s));
     }
 
     public void Tick(GameTime time)
@@ -390,8 +415,11 @@ public sealed class MountService : IGameTicker
             next.Mounts[id] = mount;
             // The wardrobe Mount tab lights only from 5034, so the appearance commits with the ownership.
             var look = _wardrobe.WithMount(s, mount);
-            if (await _character.ExchangeLockedAsync(s, [], [], new Dictionary<long, int> { [item.Guid] = 1 }, popup: false,
-                persist: tx =>
+            if (await _character.ExchangeLockedAsync(s, new ExchangeRequest
+            {
+                Instances = new Dictionary<long, int> { [item.Guid] = 1 },
+                Popup = false,
+                Persist = tx =>
                 {
                     tx.RoleBlob(s.Role!.Id, "mounts", Encode(s, next));
                     if (look != null) tx.RoleBlob(s.Role!.Id, "wardrobe", look.ToByteArray());
@@ -401,11 +429,14 @@ public sealed class MountService : IGameTicker
                             Item = item.Entry, Mount = id,
                             StateHash = Convert.ToHexString(SHA256.HashData(Encode(s, next)))
                         }));
-                }, committed: () =>
+                },
+                Committed = () =>
                 {
                     s.Mounts = next; ArmExpiry(s);
                     if (look != null) _wardrobe.AdoptCommitted(s, look);
-                }, asyncCommit: true) == null) error = ErrorCodes.ItemsShort;
+                },
+                AsyncCommit = true,
+            }) == null) error = ErrorCodes.ItemsShort;
             else
             {
                 await PublishOwnedAsync(s);
@@ -449,7 +480,7 @@ public sealed class MountService : IGameTicker
     {
         var defaults = Etchants(mount.MountId, 0).Where(r => GameData.Int(r, "_iDefault") == 1).ToArray();
         if (defaults.Length == 0) return;
-        for (int plan = 0; plan < Param("EtchantPlanMax", 4); plan++)
+        for (int plan = 0; plan < (int)(Data.Config.PublicParams.Of(_data).EtchantPlanMax ?? 4); plan++)
         {
             if (mount.EtChantInfo.ContainsKey(plan)) continue;
             var selection = new MountEtchant();
@@ -459,7 +490,7 @@ public sealed class MountService : IGameTicker
     }
 
     private int EtchantError(GameSession s, int mount, int plan, int part = 0) => OwnedError(s, mount) is var owned and not 0 ? owned
-        : plan < 0 || plan >= Param("EtchantPlanMax", 4) || !Etchants(mount, part).Any() ? ErrorCodes.Parameter : 0;
+        : plan < 0 || plan >= (int)(Data.Config.PublicParams.Of(_data).EtchantPlanMax ?? 4) || !Etchants(mount, part).Any() ? ErrorCodes.Parameter : 0;
 
     private static string PreviewKey(int mount, int plan, int part) => $"{mount}:{plan}:{part}";
 
@@ -467,7 +498,7 @@ public sealed class MountService : IGameTicker
     {
         using var gate = await CharacterService.Lock(s);
         int error = req.PlanId == 0 || req.Part <= 0 ? ErrorCodes.Parameter : EtchantError(s, req.MountId, req.PlanId, req.Part), selected = 0;
-        var cost = new[] { (Entry: Param("EtchantRefreshItemId", 2), Count: (long)Param("EtchantRefreshItemCount", 1000)) };
+        var cost = new[] { (Entry: (int)(Data.Config.PublicParams.Of(_data).EtchantRefreshItemId ?? 2), Count: (long)(int)(Data.Config.PublicParams.Of(_data).EtchantRefreshItemCount ?? 1000)) };
         if (error == 0)
         {
             var candidates = Etchants(req.MountId, req.Part).Where(r => GameData.Int(r, "_iWeight") > 0).ToArray();
@@ -476,7 +507,11 @@ public sealed class MountService : IGameTicker
             foreach (var row in candidates) if ((roll -= GameData.Int(row, "_iWeight")) < 0) { selected = (int)GameData.Int(row, "_iID"); break; }
             var state = JsonSerializer.Deserialize<SavedState>(Encode(s))!;
             state.Previews[PreviewKey(req.MountId, req.PlanId, req.Part)] = selected;
-            if (await _character.ExchangeLockedAsync(s, cost, [], popup: false, persist: tx =>
+            if (await _character.ExchangeLockedAsync(s, new ExchangeRequest
+            {
+                Cost = cost,
+                Popup = false,
+                Persist = tx =>
                 {
                     tx.RoleBlob(s.Role!.Id, "mounts", Encode(s, state: state));
                     tx.WithEconomy(_character.FamilyEconomy(s, "cd13b/mount-etchant-refresh", cost, [],
@@ -485,7 +520,10 @@ public sealed class MountService : IGameTicker
                             Mount = req.MountId, Part = req.Part, Selected = selected,
                             StateHash = Convert.ToHexString(SHA256.HashData(Encode(s, state: state)))
                         }));
-                }, committed: () => s.MountState = state, asyncCommit: true) == null)
+                },
+                Committed = () => s.MountState = state,
+                AsyncCommit = true,
+            }) == null)
                 error = _character.ShortageOf(s, cost);
         }
         await s.SendGameAsync(EtchantRefresh, new MountEtchantRefreshResp { Result = error, CfgId = error == 0 ? selected : 0, Req = req });
@@ -541,7 +579,10 @@ public sealed class MountService : IGameTicker
         {
             var state = JsonSerializer.Deserialize<SavedState>(Encode(s))!;
             state.Claimed.UnionWith(req.Index);
-            if (await _character.ExchangeLockedAsync(s, [], goods, persist: tx =>
+            if (await _character.ExchangeLockedAsync(s, new ExchangeRequest
+            {
+                Goods = goods,
+                Persist = tx =>
                 {
                     tx.RoleBlob(s.Role!.Id, "mounts", Encode(s, state: state));
                     tx.WithEconomy(_character.FamilyEconomy(s, "cd13b/mount-score", [], goods,
@@ -550,7 +591,10 @@ public sealed class MountService : IGameTicker
                             Indices = req.Index.ToArray(),
                             StateHash = Convert.ToHexString(SHA256.HashData(Encode(s, state: state)))
                         }));
-                }, committed: () => s.MountState = state, asyncCommit: true) == null)
+                },
+                Committed = () => s.MountState = state,
+                AsyncCommit = true,
+            }) == null)
                 resp.Result = ErrorCodes.ItemNoConfig;
             else resp.Index.Add(req.Index);
         }

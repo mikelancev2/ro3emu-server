@@ -101,6 +101,10 @@ public class MonsterUnit : WorldUnit
     /// <summary>A destination it walks to between fights instead of roaming at home (MonsterService.March); null: none.</summary>
     public MonsterMarch? March { get; set; }
 
+    /// <summary>Players this unit does not pick as a target on sight (MonsterService.NearestTarget); null: none. A hit
+    /// from them still makes them its target.</summary>
+    public Func<GameSession, bool>? Ignores { get; set; }
+
     /// <summary>Status bits (property 2701); bit 15 = fighting.</summary>
     public long StatusBits { get; set; }
 
@@ -113,6 +117,8 @@ public class MonsterUnit : WorldUnit
     public Action<EntityBase>? EntityExtras { get; set; }
 
     public override void Tick(MapInstance map, GameTime time) => Brain?.Tick(this, map);
+
+    internal override bool Resting => Viewers.Count == 0 && Brain?.Dormant(this) != false;
 
     /// <summary>Position along the current segment at <paramref name="nowMs"/> (updates X/Y/Z).</summary>
     public void Advance(long nowMs)
@@ -203,4 +209,7 @@ public sealed class MonsterMarch(float goalX, float goalZ, float arriveRadius)
 public interface IMonsterBrain
 {
     void Tick(MonsterUnit monster, MapInstance map);
+
+    /// <summary>Nothing is in progress for it: its tick only moves the roam clock.</summary>
+    bool Dormant(MonsterUnit monster);
 }

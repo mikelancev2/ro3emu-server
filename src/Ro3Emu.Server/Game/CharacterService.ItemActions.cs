@@ -49,7 +49,7 @@ public sealed partial class CharacterService
     internal void RegisterItemAction(int action, Func<ItemActionUse, Task<int>> handler, bool takesParam = false,
         Func<GameSession, Ownership.ReservationKey[]>? keys = null)
     {
-        if (_itemActions.Count == 0) SpecialItemUse.Add(UseItemActionAsync);
+        if (_itemActions.Count == 0) SpecialItemUse.Subscribe(UseItemActionAsync);
         _itemActions.Add(action, new ItemAction(handler, takesParam, keys));
     }
 
@@ -157,13 +157,20 @@ public sealed partial class CharacterService
         object outcome, string kind = CharacterFamilyEconomy.ItemActionKind)
     {
         var s = use.Session;
-        return await ExchangeLockedAsync(s, [], [], new Dictionary<long, int> { [use.Item.Guid] = use.Count }, popup: false,
-            sync: false, persist: tx =>
+        return await ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Instances = new Dictionary<long, int> { [use.Item.Guid] = use.Count },
+            Popup = false,
+            Sync = false,
+            Persist = tx =>
             {
                 persist?.Invoke(tx);
                 tx.WithEconomy(FamilyEconomy(s, kind, [(use.Item.Entry, use.Count)], [],
                     new { Item = use.Item.Entry, use.Count, use.Effects, Outcome = outcome }));
-            }, committed: committed, asyncCommit: true) != null;
+            },
+            Committed = committed,
+            AsyncCommit = true,
+        }) != null;
     }
 
     /// <summary>
@@ -182,20 +189,26 @@ public sealed partial class CharacterService
         if (currency) throw new InvalidOperationException("An item action spends a bag item.");
         string operation = Guid.NewGuid().ToString("N");
         var envelope = new EconomyEnvelope(operation, s.Account!, s.Role.Id, kind, kind, kind + ":" + operation,
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), [sink], []);
+            s.NowMs, [sink], []);
         // E05d freezes the staged children when it binds, so the item use's cooldown (the 31323 scope's bag_state) is
         // staged here, before it, and the scope is published with the commit instead of by the exchange.
         var scope = LifeItemExchange.Value is { Active: true, Committed: false } live && ReferenceEquals(live.Session, s) ? live : null;
         if (scope != null) scope.Active = false;
         try
         {
-            return await ExchangeLockedAsync(s, [], [], new Dictionary<long, int> { [use.Item.Guid] = use.Count }, popup: false,
-                sync: false, persist: tx => { persist(tx); scope?.Persist(tx); tx.WithEconomy(envelope); },
-                committed: () =>
+            return await ExchangeLockedAsync(s, new ExchangeRequest
+            {
+                Instances = new Dictionary<long, int> { [use.Item.Guid] = use.Count },
+                Popup = false,
+                Sync = false,
+                Persist = tx => { persist(tx); scope?.Persist(tx); tx.WithEconomy(envelope); },
+                Committed = () =>
                 {
                     if (scope != null) { scope.Committed = true; scope.Publish(); }
                     committed?.Invoke();
-                }, asyncCommit: true) != null;
+                },
+                AsyncCommit = true,
+            }) != null;
         }
         finally { if (scope != null) scope.Active = true; }
     }

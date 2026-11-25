@@ -30,7 +30,7 @@ public sealed partial class TerritoryEscortService
             State = EntityState.Alive, NotifyType = EntityBase.Types.NotifyType.All,
             MovementInfo = new MovementInfo
             {
-                Pos = Pos, Face = Face, ServerTime = MonsterService.NowMs,
+                Pos = Pos, Face = Face, ServerTime = NowMs,
                 MoveType = MovementType.MoveTypeNone
             },
         };
@@ -92,23 +92,28 @@ public sealed partial class TerritoryEscortService
                 var source = $"escort-cargo:{Epoch}:{id}:claim";
                 var mutation = new EventEconomyMutation(EventEconomy.Catalog(_data), Guid.NewGuid().ToString("N"),
                     session.Account!, session.Role!.Id, "event/escort-cargo-pickup", source,
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), [], [],
+                    _loop.NowMs, [], [],
                     [new(new(EconomyOwnerKind.Escrow, "escort-cargo:" + id), item, -1),
                      new(new(EconomyOwnerKind.Role, session.Role.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)), item, 1)],
                     JsonSerializer.SerializeToUtf8Bytes(new { Cargo = id, Role = session.Role.Id }));
-                var granted = await _character.ExchangeLockedAsync(session, [], [(1258002, 1)],
-                    persist: tx =>
+                var granted = await _character.ExchangeLockedAsync(session, new ExchangeRequest
+                {
+                    Goods = [(1258002, 1)],
+                    Persist = tx =>
                     {
                         tx.Add(new Ro3Emu.Server.Accounts.Persistence.RealmStatePlan(
                             Ro3Emu.Server.Accounts.Persistence.RealmStateKind.TerritoryEscort,
                             JsonSerializer.SerializeToUtf8Bytes(ledger)));
                         tx.WithEventEconomy(mutation);
-                    }, asyncCommit: true, appliedBeforeNotify: () =>
+                    },
+                    AsyncCommit = true,
+                    AppliedBeforeNotify = () =>
                     {
                         BeforeCargoApplyForTest?.Invoke();
                         _committedLedger = CopyLedger(ledger);
                         PublishSnapshots();
-                    });
+                    },
+                });
                 if (granted == null) { cargo.Picked = false; return ErrorCodes.BagFull; }
             }
             catch
@@ -199,7 +204,7 @@ public sealed partial class TerritoryEscortService
             X = owner.Position.X - 3, Y = owner.Position.Y, Z = owner.Position.Z,
             Face = owner.Face, Template = template, Group = new SpawnGroup(-1, false, 1, 0, [], [point]),
             Home = point, Hp = cart.CurrentHp > 0 ? Math.Min(cart.CurrentHp, template.MaxHp) : template.MaxHp,
-            BornTimeMs = MonsterService.NowMs
+            BornTimeMs = _loop.NowMs
         };
     }
 
@@ -251,7 +256,7 @@ public sealed partial class TerritoryEscortService
                 long uid = CartUidBase | cart.Id;
                 if (_cartRespawnAfter.TryGetValue(uid, out long due))
                 {
-                    if (MonsterService.NowMs < due) continue;
+                    if (_loop.NowMs < due) continue;
                     _cartRespawnAfter.TryRemove(uid, out _);
                 }
                 if (!_liveCarts.TryGetValue(uid, out var live))
@@ -279,7 +284,7 @@ public sealed partial class TerritoryEscortService
                         TransType = MovementTransitionType.MoveTransNormal,
                         MovementInfo = new MovementInfo
                         {
-                            Pos = unit.Pos, ServerTime = MonsterService.NowMs,
+                            Pos = unit.Pos, ServerTime = _loop.NowMs,
                             Face = unit.Face, MoveType = MovementType.MoveTypeNone
                         }
                     });
@@ -351,7 +356,7 @@ public sealed partial class TerritoryEscortService
     private void DeferCartRespawn(MonsterUnit monster)
     {
         long delayMs = monster.Template.BodyRemainMs + 250;
-        _cartRespawnAfter[monster.Uid] = MonsterService.NowMs + delayMs;
+        _cartRespawnAfter[monster.Uid] = _loop.NowMs + delayMs;
         _loop.ScheduleRuntime(TimeSpan.FromMilliseconds(delayMs), RefreshCartActorsAsync);
     }
 

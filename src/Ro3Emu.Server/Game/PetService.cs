@@ -17,6 +17,7 @@ namespace Ro3Emu.Server.Game;
 /// </summary>
 public sealed partial class PetService
 {
+    public const int Function = 33, IncubationFunction = 3301, IncubationRoomFunction = 3302;
     public const uint PetSync = 5017, LevelUp = 33302, ProgressUp = 33303, StarUp = 33304, Combine = 33308,
         Rebirth = 33310, StateUpdate = 33311, FragmentsBroken = 33312, SwitchPlan = 33314, ChangePlanName = 33315,
         RoomLevelUp = 33316, OpenRoom = 33317, GenerateEgg = 33318, EggReward = 33319, SetSkipAnim = 33320,
@@ -44,8 +45,8 @@ public sealed partial class PetService
         this._seasons = seasons;
         _stars = data.Table("PetStarConfig").Values.ToDictionary(r => ((int)GameData.Int(r, "_iPetID"), (int)GameData.Int(r, "_iStar"), (int)GameData.Int(r, "_iStage")));
         _levels = data.Table("PetExpConfig").Values.ToDictionary(r => ((int)GameData.Int(r, "_iQuality"), (int)GameData.Int(r, "_iLv")));
-        character.ExtraAttributes.Add(Attributes);
-        character.SpecialItemUse.Add(TryUseSelfChooseAsync);
+        character.ExtraAttributes.Subscribe(Attributes);
+        character.SpecialItemUse.Subscribe(TryUseSelfChooseAsync);
         character.RegisterItemAction(AddIncubateRoomExpAction, UseRoomExpItemAsync);
     }
 
@@ -108,8 +109,8 @@ public sealed partial class PetService
         await PublishGuardianChangeAsync(session);
     }
 
-    private int Gate(GameSession s, bool incubation = false) => s.Pets == null || !_functions.IsOpen(s, PetFunction)
-        || incubation && (!_functions.IsOpen(s, 3301) || !_functions.IsOpen(s, 3302)) ? ErrorCodes.FeatureUnavailable : 0;
+    private int Gate(GameSession s, bool incubation = false) => s.Pets == null || !_functions.IsOpen(s, Function)
+        || incubation && (!_functions.IsOpen(s, IncubationFunction) || !_functions.IsOpen(s, IncubationRoomFunction)) ? ErrorCodes.FeatureUnavailable : 0;
 
     private int Owned(GameSession s, int id) => Gate(s) is var gate and not 0 ? gate
         : _data.Row("PetBaseConfig", id) == null ? ErrorCodes.PetNoConfig
@@ -127,7 +128,7 @@ public sealed partial class PetService
             await _character.RefreshStatsAsync(s);
             await _follower.RefreshAsync(s);
             // A committed lineup change: quest targets read it (growth-manual 103034 CheckSetUpPetCount).
-            if (!items) foreach (var handler in _character.StateChanged) handler(s);
+            if (!items) foreach (var handler in _character.StateChanged.Handlers) handler(s);
         }
     }
 
@@ -148,18 +149,26 @@ public sealed partial class PetService
     {
         UpdatePower(next);
         var grants = goods ?? [];
-        bool done = await _character.ExchangeLockedAsync(s, cost, grants, popup: false, sync: false,
-            persist: tx =>
+        bool done = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Cost = cost,
+            Goods = grants,
+            Popup = false,
+            Sync = false,
+            Persist = tx =>
             {
                 tx.RoleBlob(s.Role!.Id, "pets", next.ToByteArray());
                 if (lottery != null) tx.RoleBlob(s.Role.Id, "lottery", LotteryService.Pack(lottery, s.LotteryDay));
                 tx.WithEconomy(_character.FamilyEconomy(s, "cd13b/pet-" + kind, cost, grants,
                     new { StateHash = Convert.ToHexString(SHA256.HashData(next.ToByteArray())) }));
-            }, committed: () =>
+            },
+            Committed = () =>
             {
                 s.Pets = next;
                 if (lottery != null) s.Lottery = lottery;
-            }, asyncCommit: true) != null;
+            },
+            AsyncCommit = true,
+        }) != null;
         if (done && lottery != null) await CharacterService.SyncAsync(s, LotteryService.LotterySync, lottery.Clone());
         return done;
     }
@@ -186,7 +195,13 @@ public sealed partial class PetService
         IReadOnlyList<(int, int)> goods, Dictionary<int, Dictionary<int, long>> books)
     {
         UpdatePower(next);
-        var paid = await _character.ExchangeLockedAsync(s, cost, goods, popup: false, sync: false, persist: tx =>
+        var paid = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Cost = cost,
+            Goods = goods,
+            Popup = false,
+            Sync = false,
+            Persist = tx =>
         {
             tx.RoleBlob(s.Role!.Id, "pets", next.ToByteArray());
             tx.RoleBlob(s.Role.Id, "pet_books", JsonSerializer.SerializeToUtf8Bytes(books));
@@ -196,7 +211,10 @@ public sealed partial class PetService
                     StateHash = Convert.ToHexString(SHA256.HashData(next.ToByteArray())),
                     BooksHash = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(books)))
                 }));
-        }, committed: () => s.Pets = next, asyncCommit: true);
+        },
+            Committed = () => s.Pets = next,
+            AsyncCommit = true,
+        });
         if (paid == null) return false;
         return true;
     }
@@ -382,7 +400,7 @@ public sealed partial class PetService
     /// read them, and requiring them as well refused support slot 2 below level 55 ("Invalid support slot").
     /// </summary>
     private bool SlotOpen(GameSession s, int source, int slot) =>
-        slot >= 1 && slot <= (source == 1 ? PetParam("PetFightFieldNum", 4) : PetParam("PetAssistFieldNum", 5))
+        slot >= 1 && slot <= (source == 1 ? (Data.Config.PublicParams.Of(_data).PetFightFieldNum ?? 4) : (Data.Config.PublicParams.Of(_data).PetAssistFieldNum ?? 5))
         && PetSetLimitConfig.Get(_data, slot) is { } limit
         && _functions.ConditionMet(s, source == 1 ? limit.Condition1 : limit.Condition2);
 
@@ -495,7 +513,7 @@ public sealed partial class PetService
     /// </summary>
     private IEnumerable<(long Id, double Value)> Attributes(GameSession s)
     {
-        if (s.Pets == null || !_functions.IsOpen(s, PetFunction)) yield break;
+        if (s.Pets == null || !_functions.IsOpen(s, Function)) yield break;
         foreach (var pet in s.Pets.ListPet.Values.Where(p => p.IsActiveCollect))
             if (StarRow(pet) is { } row)
                 foreach (var attr in GameData.Pairs(row, "_kCollectAttr")) yield return attr;

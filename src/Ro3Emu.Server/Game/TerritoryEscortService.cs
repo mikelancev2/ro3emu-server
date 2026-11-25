@@ -14,8 +14,10 @@ namespace Ro3Emu.Server.Game;
 /// clientB LC_TerritoryWarsTradeServer and LC_TerritoryWarsServer senders and the msgtable. Server policy
 /// that cannot be recovered from those senders is identified as inferred beside the transition.
 /// </summary>
-public sealed partial class TerritoryEscortService : IGameTicker
+public sealed partial class TerritoryEscortService : IGameTicker, ICombatRule
 {
+    bool ICombatRule.IsPlayerHostile(GameSession attacker, GameSession defender) => Hostile(attacker, defender);
+    bool ICombatRule.CanHitMonster(GameSession attacker, MonsterUnit target) => CanHitCart(attacker, target);
     public const uint UseNpcSkill = 83050, QueryOwner = 83055, Selling = 83070, History = 83071,
         Buy = 83072, BuyOrders = 83073, Sell = 83074, TakeDown = 83075, SellOrders = 83076,
         Operate = 83077, PlayTime = 83079, GuildPlay = 83080, PlayersPlay = 83081,
@@ -245,7 +247,7 @@ public sealed partial class TerritoryEscortService : IGameTicker
     private bool _ticking, _reconciledOnce; // the first reconciliation runs on the loop's first tick (startup), not 1 s later
     public Func<int, long>? OwnerOf { get; set; }
     /// <summary>After a committed cart start, its escort (the member who took it). Listeners post their work.</summary>
-    public List<Action<GameSession>> CartStarted { get; } = [];
+    public SyncHook<GameSession> CartStarted { get; } = new("TerritoryEscortService.CartStarted");
     public Func<long, int>? GuildPoint { get; set; }
 
     public TerritoryEscortService(AccountStore accounts, GuildStore guilds, GuildService guildService, RoleStore roles, GameData data,
@@ -275,21 +277,21 @@ public sealed partial class TerritoryEscortService : IGameTicker
                 rounds[play.Round] = play.Score;
             }
         PublishSnapshots();
-        scene.Loaded.Add(SceneLoadedAsync);
-        scene.LoadedKeys.Add(SceneKeys);
-        scene.Leaving.Add(SceneLeavingAsync);
-        combat.Killed.Add(CartKilledAsync);
-        combat.MonsterDamageApplied.Add(CartDamagedAsync);
-        combat.PvpDealt.Add(PvpRecorded);
-        combat.PlayerKilled.Add(PlayerKilledAsync);
+        scene.Loaded.Subscribe(SceneLoadedAsync);
+        scene.LoadedKeys.Subscribe(SceneKeys);
+        scene.Leaving.Subscribe(SceneLeavingAsync);
+        combat.Killed.Subscribe(CartKilledAsync);
+        combat.MonsterDamageApplied.Subscribe(CartDamagedAsync);
+        combat.PvpDealt.Subscribe(PvpRecorded);
+        combat.PlayerKilled.Subscribe(PlayerKilledAsync);
     }
 
     private static long RoleId(GameSession s) => s.Role?.Id ?? 0;
     private GuildStore.State? Own(GameSession s) => s.Role == null ? null : _guilds.ForRole(s.Role.Id);
     private static bool Right(GuildStore.State? g, long role, int right) => g != null && g.Members.TryGetValue(role, out var m)
-        && (m.Official == 1 || g.Rights.GetValueOrDefault(right)?.Contains(m.Official) == true);
+        && (m.Official == GuildOfficial.Leader || g.Rights.GetValueOrDefault(right)?.Contains(m.Official) == true);
     private static int MarketPermission(GuildStore.State? g, long role) => g == null ? ErrorCodes.NotInGuild
-        : Right(g, role, 16) ? 0 : ErrorCodes.GuildPermission;
+        : Right(g, role, GuildRight.EscortMarket) ? 0 : ErrorCodes.GuildPermission;
     private int Round => _clock.Current.Round;
     private bool Trading => _clock.Current.Type == 1;
     private bool Playing => _clock.Current.Type == 2;

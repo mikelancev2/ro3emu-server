@@ -26,8 +26,7 @@ public sealed partial class DungeonTests
             if (ReferenceEquals(monster, actor)) staged.TrySetResult();
             return Task.CompletedTask;
         };
-        var hooks = Service<CombatService>().BeforeKilled;
-        hooks.Insert(hooks.FindIndex(h => h.Target is RewardService), stageNotice);
+        using var stageSub = Service<CombatService>().BeforeKilled.Subscribe(stageNotice, order: -1);
         FixtureSql.Execute(Service<AccountStore>(), """
             CREATE TRIGGER fail_terminal_kill BEFORE INSERT ON operation_receipt
             WHEN NEW.command_kind='monster-kill' BEGIN SELECT RAISE(ABORT, 'kill receipt fault'); END
@@ -56,7 +55,6 @@ public sealed partial class DungeonTests
         }
         finally
         {
-            hooks.Remove(stageNotice);
             FixtureSql.Execute(Service<AccountStore>(), "DROP TRIGGER fail_terminal_kill");
         }
     }
@@ -252,7 +250,7 @@ public sealed partial class DungeonTests
         var request = new EnterDungeonReq { SceneEntry = story };
         string original = Service<GameData>().Row("DungeonConfig", story)!.Value
             .GetProperty("_kResSceneEditorName").GetString()!;
-        string source = Path.Combine(RepoRoot(), "data", "sceneeditor", original + ".json");
+        string source = Path.Combine(ClientData.RepoRoot, "data", "sceneeditor", original + ".json");
         string directory = Path.Combine(_dataDir, "sceneeditor");
         Directory.CreateDirectory(directory);
         string stem = Path.Combine(directory, "synthetic_aoe_1054001");

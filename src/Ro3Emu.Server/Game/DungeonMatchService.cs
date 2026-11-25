@@ -8,7 +8,7 @@ namespace Ro3Emu.Server.Game;
 /// multi dungeon and mark; LC_DAL_Match drives the separate 82636/82637 ready panel. The ordinary
 /// DungeonService owns admission, 70010/30005 and encounter settlement after all votes.
 /// </summary>
-public sealed class DungeonMatchService : IGameTicker
+public sealed partial class DungeonMatchService : IGameTicker
 {
     public const uint StartMatch = 82681, CancelMatch = 82682, Ready = 82637, ReadyNotify = 82636,
         Reminder = 82634, ReminderNotify = 82635, MatchStartNotify = 82638, CancelNotify = 82639, FailNotify = 82643;
@@ -223,8 +223,8 @@ public sealed class DungeonMatchService : IGameTicker
             match.DeadlineMs - _time.GetUtcNow().ToUnixTimeMilliseconds())), () => ExpireAsync(match));
     }
 
-    private int ReadySeconds() => _data.Table("PublicParamConfig").TryGetValue("GamePlayAssembleMaxTime", out var row)
-        ? (int)Math.Clamp(GameData.Number(row) ?? 30, 1, 300) : 30;
+    private int ReadySeconds() =>
+        (int)Math.Clamp(Data.Config.PublicParams.Of(_data).GamePlayAssembleMaxTime ?? 30, 1, 300);
 
     private async Task BroadcastReadyAsync(Match match)
     {

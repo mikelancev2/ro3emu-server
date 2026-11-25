@@ -45,7 +45,7 @@ namespace Ro3Emu.Server.Game;
 /// <see cref="Throttle"/> (inferred interval). maxHistoryPower is the highest total ever published and is saved,
 /// with the current total for the offline leaderboard, in the role's Soul Echo blob (EmblemState.Power).
 /// </summary>
-public sealed class PowerService : IGameTicker
+public sealed partial class PowerService : IGameTicker
 {
     public const uint ChangeNtf = 31502, PackageNtf = 31503;
     private static readonly TimeSpan ProbeEvery = TimeSpan.FromMilliseconds(250);
@@ -97,10 +97,10 @@ public sealed class PowerService : IGameTicker
         this._seasonRefine = seasonRefine; this._roles = roles; this._sessions = sessions; this._loop = loop; this._log = log;
         emblems.PublishPower = s => PublishAsync(s, always: true);
         // Hooks only mark the role: several fire inside the character lock or a commit's apply.
-        character.StateChanged.Add(Queue);
-        character.ProgressHandlers.Add(s => { Queue(s); return Task.CompletedTask; });
-        character.JobChanged.Add(s => { Queue(s); return Task.CompletedTask; });
-        skills.Learned.Add(s => { Queue(s); return Task.CompletedTask; });
+        character.StateChanged.Subscribe(Queue);
+        character.ProgressHandlers.Subscribe(s => { Queue(s); return Task.CompletedTask; });
+        character.JobChanged.Subscribe(s => { Queue(s); return Task.CompletedTask; });
+        skills.Learned.Subscribe(s => { Queue(s); return Task.CompletedTask; });
         gm.Register("power", "(this role's power package, 31502/31503 and the history)", GmAsync);
     }
 
@@ -356,7 +356,7 @@ public sealed class PowerService : IGameTicker
         await SaveAsync(s, snapshot);
         if (s.Role != role || !ReferenceEquals(s.Attachment, attachment)) return;
         s.Power = snapshot;
-        s.PowerPublishedMs = MonsterService.NowMs;
+        s.PowerPublishedMs = _loop.NowMs;
         await s.SendGameAsync(ChangeNtf, new PlayerChangePowerNtf
         {
             CurPower = total.Clone(),
@@ -424,7 +424,7 @@ public sealed class PowerService : IGameTicker
             for (int i = 0; i < slice; i++) probe.Add(all[(_sweepIndex + i) % all.Count]);
             _sweepIndex = (_sweepIndex + slice) % all.Count;
         }
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         foreach (var s in probe)
         {
             if (!Live(s) || _queued.Contains(s)) continue;

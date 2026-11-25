@@ -21,6 +21,7 @@ public sealed partial class LifeJobService
         HealthAll = 33513, HealthOne = 33514, HealthNotify = 33515;
     public const int VigorId = 1004, VigorUsesId = 1005, VigorCurrencyId = 407;
 
+    internal ExplorationNoteDrops? ExplorationNotes { get; set; }
     private readonly GameData _data;
     private readonly CharacterService _character;
     private readonly FunctionService _functions;
@@ -48,10 +49,10 @@ public sealed partial class LifeJobService
         this._data = data; this._character = character; this._functions = functions; this._seasons = seasons;
         this._awards = awards; this._roles = roles; this._loop = loop; this._clock = clock; this._log = log;
         character.LifeItemUse = UseLifeItemAsync;
-        character.StateChanged.Add(SyncVigorChange);
-        character.ExtraAttributes.Add(FoodAttributes);
-        character.ProgressHandlers.Add(OnLevelChangedAsync);
-        scene.Leaving.Add(CancelAsync);
+        character.StateChanged.Subscribe(SyncVigorChange);
+        character.ExtraAttributes.Subscribe(FoodAttributes);
+        character.ProgressHandlers.Subscribe(OnLevelChangedAsync);
+        scene.Leaving.Subscribe(CancelAsync);
     }
 
     /// <summary>
@@ -67,7 +68,7 @@ public sealed partial class LifeJobService
         var restriction = savedRestriction is { } restrictionBytes ? DBRestrictInfo.Parser.ParseFrom(restrictionBytes) : new DBRestrictInfo();
         var runtime = savedRuntime is { } runtimeBytes ? JsonSerializer.Deserialize<RuntimeState>(runtimeBytes) ?? new() : new();
         if (!restriction.RestrictCount.ContainsKey(VigorId)) restriction.RestrictCount[VigorId] = new RestrictInfo
-        { Id = VigorId, Count = Param("VitalityInitCount", 500), LimitCount = RestrictMax(VigorId), LastRecoverTime = NowSeconds };
+        { Id = VigorId, Count = (Data.Config.PublicParams.Of(_data).VitalityInitCount ?? 500), LimitCount = RestrictMax(VigorId), LastRecoverTime = NowSeconds };
         if (!restriction.RestrictCount.ContainsKey(VigorUsesId)) restriction.RestrictCount[VigorUsesId] = new RestrictInfo
         { Id = VigorUsesId, Count = RestrictMax(VigorUsesId), LimitCount = RestrictMax(VigorUsesId) };
         Reconcile(life, restriction, runtime);
@@ -113,11 +114,9 @@ public sealed partial class LifeJobService
 
     private long NowSeconds => _clock.GetUtcNow().ToUnixTimeSeconds();
     private long Today => Day(_clock.GetLocalNow().DateTime);
-    private static long Day(DateTime now) => DateOnly.FromDateTime(now.AddHours(-5)).DayNumber;
+    private static long Day(DateTime now) => GameCalendar.GameDayOf(now).DayNumber;
     public static long DailyEnergyUsed(GameSession s, long restriction) => restriction == VigorId
-        && s.LifeRuntime.EnergyDay == Day(DateTime.Now) ? s.LifeRuntime.EnergySpent : 0;
-    private long Param(string name, long fallback) => _data.Table("PublicParamConfig").TryGetValue(name, out var v)
-        ? (long)(GameData.Number(v) ?? fallback) : fallback;
+        && s.LifeRuntime.EnergyDay == Day(s.Clock.GetLocalNow().DateTime) ? s.LifeRuntime.EnergySpent : 0;
     private long RestrictMax(int id) => _data.Row("RestrictConfig", id) is { } r ? GameData.Int(r, "_iMaxRestrictNum") : 0;
     private static RuntimeState Copy(RuntimeState r) => new()
     { EnergyDay = r.EnergyDay, EnergySpent = r.EnergySpent, PotionDay = r.PotionDay, FoodBook = r.FoodBook };
@@ -142,14 +141,14 @@ public sealed partial class LifeJobService
 
     /// <summary>Restrictions another service keeps (the Rift's RestrictConfig 1020): shown in the same 5018 map, never
     /// saved with or compared against the life restrictions.</summary>
-    public List<Func<GameSession, RestrictInfo?>> ProjectedRestrictions { get; } = [];
+    public OrderedHook<Func<GameSession, RestrictInfo?>> ProjectedRestrictions { get; } = new("LifeJobService.ProjectedRestrictions");
 
     private DBRestrictInfo RestrictView(GameSession s)
     {
         var view = s.Restrictions!.Clone();
         if (view.RestrictCount.TryGetValue(VigorId, out var vigor))
             vigor.Count = Energy(s);
-        foreach (var project in ProjectedRestrictions)
+        foreach (var project in ProjectedRestrictions.Handlers)
             if (project(s) is { } info) view.RestrictCount[info.Id] = info;
         return view;
     }
@@ -369,7 +368,7 @@ public sealed partial class LifeJobService
     {
         long held = s.Restrictions?.RestrictCount.GetValueOrDefault(VigorId)?.Count ?? 0;
         long currency = s.Progress?.Currency.GetValueOrDefault(VigorCurrencyId) ?? 0;
-        return Math.Max(held, Math.Min(Param("VitalityExtraLimit", 5000), checked(held + currency)));
+        return Math.Max(held, Math.Min((Data.Config.PublicParams.Of(_data).VitalityExtraLimit ?? 5000), checked(held + currency)));
     }
 
     /// <summary>
@@ -379,6 +378,7 @@ public sealed partial class LifeJobService
     internal sealed class GatherResolution
     {
         internal required long RoleId { get; init; }
+        internal ExplorationNoteDrops.Roll? Note { get; init; }
         internal required byte[] BeforeLife { get; init; }
         internal required byte[] BeforeRestrict { get; init; }
         internal required byte[] BeforeRuntime { get; init; }
@@ -442,6 +442,7 @@ public sealed partial class LifeJobService
         restrict.RestrictCount[VigorId].LimitCount = VigorLimit(s, next);
         return (0, new GatherResolution
         {
+            Note = sceneEntry == s.SceneEntry && sceneEntry > 0 && pointId > 0 && s.InstanceId == 0 ? ExplorationNotes?.Choose(s) : null,
             RoleId = s.Role!.Id, BeforeLife = beforeLife,
             BeforeRestrict = beforeRestrict, BeforeRuntime = beforeRuntime, BeforeCurrencyVigor = beforeCurrencyVigor,
             Life = next, Restrict = restrict, Runtime = runtime, Grants = [.. grants],
@@ -454,7 +455,15 @@ public sealed partial class LifeJobService
         RewardSettlement settlement, Action committed)
     {
         if (!resolved.Matches(s)) return ErrorCodes.Cooldown;
-        return await CommitAsync(s, "gather-yield", resolved.Life, resolved.Restrict, resolved.Runtime, [], resolved.Grants,
+        var restrict = resolved.Restrict;
+        var grants = resolved.Grants;
+        if (resolved.Note is { } note && ExplorationNotes?.Spend(s, note) is { } remaining)
+        {
+            restrict = restrict.Clone();
+            restrict.RestrictCount[remaining.Id] = remaining;
+            grants = [.. grants, new AwardGrant(note.Item, 1, 0, 0)];
+        }
+        return await CommitAsync(s, "gather-yield", resolved.Life, restrict, resolved.Runtime, [], grants,
             rewardSettlement: settlement, gatherCommitted: committed,
             vigorCurrencyCost: resolved.CurrencyVigorCost) != null ? 0 : ErrorCodes.ItemsShort;
     }
@@ -658,8 +667,13 @@ public sealed partial class LifeJobService
             (s.Items.Single(item => item.Guid == pair.Key).Entry, (long)pair.Value))).ToArray();
         var goods = itemGrants.Select(g => (g.Entry, g.Count)).ToArray();
         // Only gathering passes a settlement. The client shows a gained item only from 31322, its bag sync shows none (LC_DAL_Reward).
-        var received = await _character.ExchangeLockedAsync(s, payment, [], instances, popup: rewardSettlement != null, sync: false,
-            persist: tx =>
+        var received = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Cost = payment,
+            Instances = instances,
+            Popup = rewardSettlement != null,
+            Sync = false,
+            Persist = tx =>
             {
                 tx.RoleBlob(s.Role!.Id, "lifejob", life.ToByteArray());
                 tx.RoleBlob(s.Role.Id, "life_restrict", restrict.ToByteArray());
@@ -678,14 +692,17 @@ public sealed partial class LifeJobService
                             Result = result
                         }));
             },
-            boundGoods: [.. itemGrants.Select(g => (g.Entry, g.Count, g.BindType))],
-            baseExp: baseExp, jobExp: jobExp,
-            rewardSettlement: rewardSettlement,
-            committed: () =>
+            BoundGoods = [.. itemGrants.Select(g => (g.Entry, g.Count, g.BindType))],
+            BaseExp = baseExp,
+            JobExp = jobExp,
+            RewardSettlement = rewardSettlement,
+            Committed = () =>
             {
                 s.LifeJob = life; s.Restrictions = restrict; s.LifeRuntime = runtime;
                 gatherCommitted?.Invoke();
-            }, asyncCommit: true);
+            },
+            AsyncCommit = true,
+        });
         if (received == null) return null;
         await _character.ItemsChangedAsync(s, stats: false);
         await SyncAsync(s);

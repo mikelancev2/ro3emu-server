@@ -72,6 +72,12 @@ public sealed class ServerOptions
     /// returns false. The projection is (inferred), kept for an operator who wants the pet visible.</summary>
     public bool PetWorldFollower { get; set; }
 
+    /// <summary>An optional night look (NightCycleService, docs/systems/night-cycle.md): each player's client draws a dark
+    /// layer over the world by the PC clock (dusk 17-19, night 19-05, dawn 05-06), in towns and fields only. Off by default:
+    /// the original game has no day and night (MapConfig _iWeather is 0 on every map and the client has no weather, sky or
+    /// time-of-day module), so this is the emulator's own addition for an operator who wants it.</summary>
+    public bool NightCycle { get; set; }
+
     /// <summary>Game-message JSON log (data/logs/traffic-*.jsonl): "off", "on" or a comma-separated account list.
     /// Formatting and writes run off the game loop; keep it off for load tests and production.</summary>
     public string TrafficLog { get; set; } = "off";
@@ -98,6 +104,12 @@ public sealed class ServerOptions
     /// the others, "log" counts them and lets them through (CheatMonitor), "off" skips the check.
     /// </summary>
     public string TravelCheck { get; set; } = "enforce";
+
+    /// <summary>
+    /// Debugging only: holds every game gate frame sent to a client this long before it goes out (PhonestChannel.SendDelay),
+    /// in order, so a local client plays as at that ping (a round trip of about this much). 0 (default) sends at once.
+    /// </summary>
+    public int DebugSendDelayMs { get; set; }
 
     /// <summary>Anti-cheat limits and the web panel's suspicious-activity thresholds (CheatMonitor, docs/systems/anticheat.md).</summary>
     public AntiCheatOptions AntiCheat { get; set; } = new();
@@ -229,6 +241,14 @@ public sealed class ServerOptions
     public int ReconnectGraceSeconds { get; set; } = 60;
 
     /// <summary>
+    /// Seconds a scene load (a map change, a line switch, entering the world) may take before the role must reconnect
+    /// (SceneService.ExpireLineLoad). The client names no deadline, so the value is (inferred). It was 30, which dropped
+    /// slower PCs on a busy realm: a live server running a fork saw 615 such timeouts in a day at 30 s and none in its
+    /// first 112 loads at 90 s. Each timeout is logged with its map and the deadline.
+    /// </summary>
+    public int SceneLoadTimeoutSeconds { get; set; } = 90;
+
+    /// <summary>
     /// TEST AID, not original behaviour: Survivor Battle (match entry 2) starts with this many entrants in teams of
     /// <see cref="ChickenTestTeamSize"/> instead of EatChickenMatchConfig's 100 in teams of 5 (the client gives no sign of
     /// server-side filler bots). 0 keeps the config. GM "!chicken shape" sets the same in memory.
@@ -270,6 +290,12 @@ public sealed class ServerOptions
     /// knob, not original behavior.)
     /// </summary>
     public double ExpRate { get; set; } = 1.0;
+
+    /// <summary>
+    /// Kill EXP shared with the killer's party (Ro3Emu:PartyExpShare). Off by default: the killer alone gets a kill's EXP, as
+    /// on the original server. (inferred: the original had no such knob; the client's own party bonus is TeamExpBuffNum.)
+    /// </summary>
+    public PartyExpShareOptions PartyExpShare { get; set; } = new();
 
     /// <summary>
     /// (inferred) Star Cores drop for roles with the Astral Level open (ParagonService.StarCoreDrops). The client data gives
@@ -661,6 +687,19 @@ public sealed class SpawnLimitRule
     public int Npc { get; set; }
     public int Max { get; set; }
 }
+
+/// <summary>
+/// <see cref="ServerOptions.PartyExpShare"/>: with <see cref="Enabled"/>, a kill's Base EXP (after the level gap, the party
+/// bonus and FieldExpRates) is shared with the killer's party members who are alive on the same map line.
+/// </summary>
+public sealed class PartyExpShareOptions
+{
+    public bool Enabled { get; set; }
+    public PartyExpShareMode Mode { get; set; } = PartyExpShareMode.Split;
+}
+
+/// <summary>Split: the EXP is divided evenly between the killer and the members. Full: every member gets the killer's EXP.</summary>
+public enum PartyExpShareMode { Split, Full }
 
 /// <summary>One <see cref="ServerOptions.FieldExpRates"/> rule: killers of base level <see cref="MinLevel"/> to
 /// <see cref="MaxLevel"/> get <see cref="Percent"/> percent of the EXP a field monster pays (100 leaves it as it is).</summary>

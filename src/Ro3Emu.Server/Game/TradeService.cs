@@ -17,6 +17,7 @@ public sealed partial class TradeService(
     SeasonService seasons, MarketStore market, SessionRegistry sessions, TimeProvider clock, ILogger<TradeService> log)
 {
     public const uint TradeSync = 5033;
+    public const int Function = 2; // FunctionConfig: Trade House
     public const uint QueryProduct = 32602, QueryInventory = 32603, FindPrice = 32604, BuyHistory = 32605,
         SaleHistory = 32606, OwnBooth = 32607, Credit = 32608, RecentPrice = 32609, Search = 32610,
         BuyTop = 32612, PutOn = 32613, UnlockSlot = 32614, PutOff = 32615, Follow = 32616,
@@ -100,7 +101,7 @@ public sealed partial class TradeService(
         var state = saved is { Length: > 0 } ? DBUserTradeInfo.Parser.ParseFrom(saved) : new DBUserTradeInfo
         {
             LastRefreshTime = NowMs, LastClientRefreshTime = NowMs,
-            CreditPoint = (int)Public("TradeCreditDefault", 1000),
+            CreditPoint = (int)(Data.Config.PublicParams.Of(data).TradeCreditDefault ?? 1000),
             StallsNum = 6, CreditScoreRatio = 1, // (inferred) initial six free TradeConfigUnlockPlace places.
         };
         if (state.LastRefreshTime == 0) state.LastRefreshTime = NowMs; // LC_DAL_Trade full sync divides this field.
@@ -145,9 +146,6 @@ public sealed partial class TradeService(
         return true;
     }
 
-    private long Public(string key, long fallback) => data.Table("PublicParamConfig").TryGetValue(key, out var value)
-        ? (long)(GameData.Number(value) ?? fallback) : fallback;
-
     private JsonElement? Eligible(int entry)
     {
         if (data.Row("TradeConfig", entry) is not { } row || GameData.Int(row, "_iTrade") != 1) return null;
@@ -161,7 +159,7 @@ public sealed partial class TradeService(
     private (int Min, int Max, int Base, int[] Ladder) PriceRule(JsonElement row)
     {
         int basis = (int)Math.Max(1, GameData.Int(row, "_iBasePrice"));
-        int ceiling = (int)Math.Min(int.MaxValue, Public("TradeLimitPrice", 999_999_999));
+        int ceiling = (int)Math.Min(int.MaxValue, (Data.Config.PublicParams.Of(data).TradeLimitPrice ?? 999_999_999));
         // (inferred) _kStableRange [5,15] are tenths of the basic price. The hidden backend's
         // market-sensitive computation is unavailable; this deterministic config range keeps repricing useful.
         var range = row.TryGetProperty("_kStableRange", out var r) && r.ValueKind == JsonValueKind.Array && r.GetArrayLength() >= 2
@@ -239,7 +237,7 @@ public sealed partial class TradeService(
         var config = Eligible(l.Entry);
         return new CCommodityInfo
         {
-            ItemId = l.Entry.ToString(CultureInfo.InvariantCulture), SkuId = l.Sku, SpuId = l.Spu,
+            ItemId = l.Entry.ToString(CultureInfo.InvariantCulture), SkuId = l.Sku, BaseSkuId = l.Sku, SpuId = l.Spu,
             SpuName = config is { } row && row.TryGetProperty("_kSpuName", out var name)
                 && name.ValueKind == JsonValueKind.String ? name.GetString() ?? "" : "",
             // Commodity times are Unix seconds: LC_DAL_Trade._parseCommodity copies them unscaled and the trade cells compare

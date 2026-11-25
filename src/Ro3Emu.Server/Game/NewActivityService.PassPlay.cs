@@ -99,16 +99,16 @@ public sealed partial class NewActivityService
     private void InitializePassPlay(CombatService combat, DungeonService dungeons, MvpService mvps, TaskService tasks,
         ChatService chat)
     {
-        combat.Killed.Add((s, _) =>
+        combat.Killed.Subscribe((s, _) =>
         {
             bool party = _teams.MembersOf(s.Role!.Id).Count > 1;
             PassEvent(s, party ? [(PassGoal.Kills, 1), (PassGoal.PartyKills, 1)] : [(PassGoal.Kills, 1)], kills: 1);
             return Task.CompletedTask;
         });
-        dungeons.Completed.Add((s, _, _) => { PassEvent(s, [(PassGoal.Dungeons, 1)], dungeons: 1); return Task.CompletedTask; });
-        mvps.ParticipantSettled.Add(s => PassEvent(s, [(PassGoal.Mvps, 1)], mvps: 1));
-        tasks.QuestDelivered.Add((s, task, _) => PassEvent(s, [(PassGoal.Quests, 1)], quest: task));
-        _character.StateChanged.Add(s =>
+        dungeons.Completed.Subscribe((s, _, _) => { PassEvent(s, [(PassGoal.Dungeons, 1)], dungeons: 1); return Task.CompletedTask; });
+        mvps.ParticipantSettled.Subscribe(s => PassEvent(s, [(PassGoal.Mvps, 1)], mvps: 1));
+        tasks.QuestDelivered.Subscribe((s, task, _) => PassEvent(s, [(PassGoal.Quests, 1)], quest: task));
+        _character.StateChanged.Subscribe(s =>
         {
             // Daily activity points are a currency: watch the balance after every award instead of the grants.
             if (s.Progress is { } progress && s.ActivityRuntime?.PassPlay is { } play
@@ -116,7 +116,7 @@ public sealed partial class NewActivityService
                 PassEvent(s, []);
         });
         chat.PlayerCommands["/pass"] = PassCommandAsync;
-        tasks.ExtraTasks.Add(PassTasks);
+        tasks.ExtraTasks.Subscribe(PassTasks);
     }
 
     /// <summary>The pass whose EXP currency 132 is earned now: the latest open one (Pass II once Pass I is done).</summary>
@@ -126,9 +126,8 @@ public sealed partial class NewActivityService
     private static (long Day, long Week) PassPeriod(DateTimeOffset localNow)
     {
         // The game day turns at 05:00, like the daily activity rows.
-        var day = DateOnly.FromDateTime(localNow.AddHours(-5).Date);
-        int sinceMonday = ((int)day.DayOfWeek + 6) % 7;
-        return (day.DayNumber, day.DayNumber - sinceMonday);
+        var day = GameCalendar.GameDayOf(localNow.DateTime);
+        return (day.DayNumber, GameCalendar.MondayOf(day).DayNumber);
     }
 
     internal static IReadOnlyList<PassChallenge> DailyFor(long roleId, long day)

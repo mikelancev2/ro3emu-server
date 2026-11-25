@@ -12,10 +12,11 @@ namespace Ro3Emu.Server.Game;
 public sealed class AppraisalService(GameData data, CharacterService character, FunctionService functions, RoleStore roles, ILogger<AppraisalService> log)
 {
     public const uint Appraise = 31401;
+    public const int EquipFunction = 7; // FunctionConfig: equipment
 
     /// <summary>After a committed appraisal and its reply: the appraised instances (achievements 302006/302008).
     /// Listeners must not take the character lock synchronously (it is held); they post their work.</summary>
-    public List<Action<GameSession, IReadOnlyList<InvItem>>> Appraised { get; } = [];
+    public SyncHook<GameSession, IReadOnlyList<InvItem>> Appraised { get; } = new("AppraisalService.Appraised");
 
     /// <summary>
     /// (inferred) Validate the whole distinct, nonempty batch before changing any item; no additional batch cap or
@@ -26,7 +27,7 @@ public sealed class AppraisalService(GameData data, CharacterService character, 
     {
         using var _ = await CharacterService.Lock(session);
         session.Owners!.Current!.BindPresentation(session);
-        int result = !functions.IsOpen(session, 7) ? ErrorCodes.FeatureUnavailable
+        int result = !functions.IsOpen(session, EquipFunction) ? ErrorCodes.FeatureUnavailable
             : req.ItemGuids.Count == 0 || req.ItemGuids.Distinct().Count() != req.ItemGuids.Count ? ErrorCodes.Parameter : 0;
         var targets = new List<InvItem>();
         if (result == 0)
@@ -77,7 +78,7 @@ public sealed class AppraisalService(GameData data, CharacterService character, 
         log.LogInformation("{Name} appraises {Count} items: {Result}", session.Role!.Name, req.ItemGuids.Count, result);
         await session.SendGameAsync(Appraise, resp);
         if (result == 0)
-            foreach (var handler in Appraised)
+            foreach (var handler in Appraised.Handlers)
                 try { handler(session, targets); }
                 catch (Exception e) { log.LogError(e, "Appraised hook failed for {Name}", session.Role!.Name); }
     }

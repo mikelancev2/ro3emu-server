@@ -183,13 +183,18 @@ public sealed partial class ShopService(GameData data, CharacterService characte
                             Payment = currency, Goods = entry, Before = bought, Counter = next.Bought[commodityId]
                         });
                 // The new-cycle allowance and its payment must commit together; a failed save cannot grant a free retry.
-                if (await _character.ExchangeLockedAsync(session, cost, [(entry, perUnit * count)],
-                    persist: tx =>
+                if (await _character.ExchangeLockedAsync(session, new ExchangeRequest
+                {
+                    Cost = cost,
+                    Goods = [(entry, perUnit * count)],
+                    Persist = tx =>
                     {
                         tx.RoleBlob(session.Role!.Id, "shop", JsonSerializer.SerializeToUtf8Bytes(next));
                         tx.WithEconomy(economy);
                     },
-                    committed: () => session.Shop = next, asyncCommit: true) == null)
+                    Committed = () => session.Shop = next,
+                    AsyncCommit = true,
+                }) == null)
                     error = new(_character.ShortageOf(session, cost), "payment short");
             }
         }
@@ -242,7 +247,7 @@ public sealed partial class ShopService(GameData data, CharacterService characte
         EconomyQuantity[] costs = payment > 0 && unit > 0 ? [new(Asset(payment), checked((long)unit * count))] : [];
         return new EconomyMutation(operation, session.Account!, session.Role!.Id, "npc-shop-buy", fingerprint,
             "npc-shop/" + session.Role.Id.ToString(CultureInfo.InvariantCulture) + "/" + operation,
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), costs, [new(Asset(entry), checked((long)perUnit * count))], outcome);
+            _clock.GetUtcNow().ToUnixTimeMilliseconds(), costs, [new(Asset(entry), checked((long)perUnit * count))], outcome);
     }
 
     /// <summary>Why a commodity cannot be bought now, or null: its shop's function, the buy/lock conditions, the variant.</summary>
@@ -289,7 +294,7 @@ public sealed partial class ShopService(GameData data, CharacterService characte
     /// </summary>
     private long MerchantDiscount(GameSession session)
     {
-        int skill = _data.Table("PublicParamConfig").TryGetValue("DiscountMerchantSkill", out var p) ? (int)(GameData.Number(p) ?? 16001) : 16001;
+        int skill = (int)(Data.Config.PublicParams.Of(_data).DiscountMerchantSkill ?? 16001);
         int level = session.Progress?.Skills.GetValueOrDefault(skill) ?? 0;
         if (level <= 0) return 0;
         var row = _data.Table("SkillConfig").Values.FirstOrDefault(r => GameData.Int(r, "_iSkillID") == skill && GameData.Int(r, "_iLevel") == level);

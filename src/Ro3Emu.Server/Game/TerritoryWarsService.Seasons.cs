@@ -56,7 +56,7 @@ public sealed partial class TerritoryWarsService
                         && ReferenceEquals(s.TerritoryBattle, b)) s.TerritoryBattle = null;
                 }
             });
-            if (!b.Room.ActiveMembers.Any()) _battles.Remove(b.Key);
+            if (b.Room.ActiveMembers.Count == 0) _battles.Remove(b.Key);
         }
         foreach (var b in _siegeBattles.Values.ToArray())
         {
@@ -78,10 +78,10 @@ public sealed partial class TerritoryWarsService
                         && ReferenceEquals(s.SiegeBattle, b)) s.SiegeBattle = null;
                 }
             });
-            if (!b.Room.ActiveMembers.Any()) _siegeBattles.Remove(b.Key);
+            if (b.Room.ActiveMembers.Count == 0) _siegeBattles.Remove(b.Key);
         }
         if (_queue.Count != 0 || _battles.Count != 0 || _siegeBattles.Count != 0) return;
-        _siegeTestOpen = null;
+        Siege.ResetTestWindow();
         await ResetWorldAsync();
         _seasonCleanupState = null;
     }
@@ -142,10 +142,10 @@ public sealed partial class TerritoryWarsService
             _guildStore.EnlistSave(guild, transaction, "Guild changed during territory season rollover");
         var beforeArchives = targetBytes is { Length: > 0 }
             ? new[] { (State: restored, Prefix: "archive/" + Epoch + "/") } : [];
-        if (WarsEconomy(original, restored, [.. priorTreasury.Values], [.. treasury.Values],
+        if (TerritoryWarsEconomy.WarsEconomy(_data, _loop.NowMs, new(original, restored, [.. priorTreasury.Values], [.. treasury.Values],
             "season-rollover", $"territory-season-rollover:{old.Epoch}:{Epoch}",
-            beforeArchives: beforeArchives,
-            afterArchives: [(old, "archive/" + old.Epoch + "/")]) is { } economy)
+            BeforeArchives: beforeArchives,
+            AfterArchives: [(old, "archive/" + old.Epoch + "/")])) is { } economy)
             transaction.WithEventEconomy(economy);
         var committed = await _roles.CommitAsync(transaction, "territory/season-rollover");
         var next = JsonSerializer.Deserialize<WorldState>((byte[])committed[receipt]!)!;

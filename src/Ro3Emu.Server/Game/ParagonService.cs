@@ -31,7 +31,7 @@ namespace Ro3Emu.Server.Game;
 /// Refusals: function closed 2057, unknown node, inactive group, locked node, no points or capped 82, core missing 154,
 /// bag full 159.
 /// </summary>
-public sealed class ParagonService
+public sealed partial class ParagonService
 {
     public const uint Sync = 5015, Allocate = 83101, Install = 83102, Remove = 83103, ResetAll = 83104, ResetSingle = 83105;
     public const int Function = 71;
@@ -52,10 +52,10 @@ public sealed class ParagonService
     {
         this._data = data; this._character = character; this._functions = functions; this._roles = roles;
         this._options = options.Value;
-        character.ExtraAttributes.Add(Attributes);
-        character.StateChanged.Add(s => _ = SyncIfOpenAsync(s));
+        character.ExtraAttributes.Subscribe(Attributes);
+        character.StateChanged.Subscribe(s => _ = SyncIfOpenAsync(s));
         power.ParagonPower = s => s.Paragon == null || s.Progress == null ? 0 : Power(s, s.Paragon);
-        rewards.ExtraKillDrops.Add(StarCoreDrops);
+        rewards.ExtraKillDrops.Subscribe(StarCoreDrops);
         gm.Register("paragon", "exp <n> | level <n> | info (Astral Level test aid)", GmAsync);
     }
 
@@ -312,15 +312,19 @@ public sealed class ParagonService
     {
         long role = s.Role!.Id;
         byte[] bytes = next.ToByteArray();
-        var result = await _character.ExchangeLockedAsync(s, [], [], paid, popup: false,
-            boundGoods: [.. returned.Select(c => (c.ItemEntry, 1, (int)(c.ItemBindInfo?.ItemBindType ?? 0)))],
-            persist: tx =>
+        var result = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Instances = paid,
+            Popup = false,
+            BoundGoods = [.. returned.Select(c => (c.ItemEntry, 1, (int)(c.ItemBindInfo?.ItemBindType ?? 0)))],
+            Persist = tx =>
             {
                 tx.RoleBlob(role, "paragon", bytes);
                 tx.WithEconomy(_character.FamilyEconomy(s, "cd13b/paragon-" + action, [.. costEntries.Select(e => (e, 1L))],
                     [.. returned.Select(c => (c.ItemEntry, 1))], new { Action = action, State = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)) }));
             },
-            committed: () => s.Paragon = next);
+            Committed = () => s.Paragon = next,
+        });
         if (result == null) return returned.Count > 0 ? ErrorCodes.BagFull : ErrorCodes.ItemsShort;
         await PublishAsync(s);
         return 0;

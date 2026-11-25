@@ -12,10 +12,11 @@ namespace Ro3Emu.Server.Game;
 /// MultiverseConfig[101]._iDanSystem; LC_SeasonHelper.CalFunctionRank consumes successive _iExpLimit values.
 /// Claims are limited per dan level across functions, not per function (GetSeasonDanRewardState:562-633).
 /// </summary>
-public sealed class SeasonPageService(GameData data, CharacterService character, FunctionService functions,
+public sealed partial class SeasonPageService(GameData data, CharacterService character, FunctionService functions,
     SeasonService seasons, RoleStore roles, RewardService rewards, MailService mail, TimeProvider clock)
 {
     public const uint PageSync = 5022, GetData = 82901, ReceiveRankReward = 82902, PutOnHonorBadge = 82903;
+    public const int Function = 69; // FunctionConfig: Season Page
 
     /// <summary>
     /// ItemConfig/Localization identify 11..14 as MVP/WoE/league/life season rank points. Function 65 is
@@ -167,7 +168,7 @@ public sealed class SeasonPageService(GameData data, CharacterService character,
                 if (group == 0 || next.RankRewardReceiveInfo.GetValueOrDefault(dan)?.Functions.Contains(function) == true)
                     continue;
                 var claimed = next.RankRewardReceiveInfo.GetValueOrDefault(dan);
-                if ((claimed?.Functions.Count ?? 0) >= Constant("MultiverseDanRewardLimit")) continue;
+                if ((claimed?.Functions.Count ?? 0) >= (int)(Data.Config.MultiverseConstants.Of(data).MultiverseDanRewardLimit ?? 0)) continue;
                 long awardId = ResolveAward(group, session);
                 var grants = Award(awardId, session);
                 if (grants.Any(g => g.Bind != 0 || g.Count <= 0 || data.Row("ItemConfig", g.Entry) == null))
@@ -226,7 +227,7 @@ public sealed class SeasonPageService(GameData data, CharacterService character,
     private int AccessError(GameSession session) => session.Role == null || session.Progress == null || session.SeasonPage == null
         || session.SeasonState?.PlayBookId != 101 || session.SeasonState.SeasonId != seasons.SeasonId
         || FunctionIds(session).Length == 0 ? ErrorCodes.FeatureUnavailable
-        : !functions.IsOpen(session, 69) ? ErrorCodes.FunctionLocked : 0; // (inferred) server enforcement of the UI gate.
+        : !functions.IsOpen(session, Function) ? ErrorCodes.FunctionLocked : 0; // (inferred) server enforcement of the UI gate.
 
     public async Task GetDataAsync(GameSession session)
     {
@@ -273,7 +274,7 @@ public sealed class SeasonPageService(GameData data, CharacterService character,
                 { error = ErrorCodes.SeasonRankReward; break; }
                 var received = next!.RankRewardReceiveInfo.GetValueOrDefault(level);
                 if (received?.Functions.Contains(function) == true) { error = ErrorCodes.RewardClaimed; break; }
-                if ((received?.Functions.Count ?? 0) >= Constant("MultiverseDanRewardLimit")) { error = ErrorCodes.SeasonRankReward; break; }
+                if ((received?.Functions.Count ?? 0) >= (int)(Data.Config.MultiverseConstants.Of(data).MultiverseDanRewardLimit ?? 0)) { error = ErrorCodes.SeasonRankReward; break; }
                 long groupId = GameData.Int(row, "_iNormalRewardGroup");
                 long award = ResolveAward(groupId, session);
                 var goods = Award(award, session);
@@ -291,9 +292,14 @@ public sealed class SeasonPageService(GameData data, CharacterService character,
             var economy = character.ProgressionEconomy(session, "cd13c/season-page-claim", [],
                 [.. grants.Select(g => (g.Entry, g.Count))],
                 new { Season = seasons.SeasonId, Claims = request.RankReward.OrderBy(x => x.Key).ToArray() }, source);
-            if (await character.ExchangeLockedAsync(session, [], [], popup: true, sync: false, attributedGoods: grants,
-                    persist: tx => { tx.RoleBlob(session.Role!.Id, "season_page", next!.ToByteArray()); tx.WithEconomy(economy); },
-                    committed: () => session.SeasonPage = next, asyncCommit: true) == null)
+            if (await character.ExchangeLockedAsync(session, new ExchangeRequest
+            {
+                Sync = false,
+                AttributedGoods = grants,
+                Persist = tx => { tx.RoleBlob(session.Role!.Id, "season_page", next!.ToByteArray()); tx.WithEconomy(economy); },
+                Committed = () => session.SeasonPage = next,
+                AsyncCommit = true,
+            }) == null)
                 error = ErrorCodes.BagFull;
             else
             {
@@ -327,9 +333,6 @@ public sealed class SeasonPageService(GameData data, CharacterService character,
         return result;
     }
 
-    private int Constant(string name) => data.Table("MultiverseConstant").TryGetValue(name, out var value)
-        ? (int)(GameData.Number(value) ?? 0) : 0;
-
     /// <summary>
     /// 82903 changes only an owned honor record; the ID refers to ItemConfig in UI_Com_Tips_GloryPanelCtrl.
     /// UI lines 246-266 enforce MultiverseMedalMaxWear. No badge is granted merely by sending this request.
@@ -349,7 +352,7 @@ public sealed class SeasonPageService(GameData data, CharacterService character,
         if (error == 0 && (!session.SeasonPage!.HonorBadgeData.TryGetValue(request.Id, out badge)
             || badge.Id != request.Id || data.Row("ItemConfig", request.Id) == null)) error = ErrorCodes.ItemMissing;
         if (error == 0 && request.IsPutOn && !badge!.IsPutOn
-            && session.SeasonPage!.HonorBadgeData.Values.Count(b => b.IsPutOn) >= Constant("MultiverseMedalMaxWear"))
+            && session.SeasonPage!.HonorBadgeData.Values.Count(b => b.IsPutOn) >= (int)(Data.Config.MultiverseConstants.Of(data).MultiverseMedalMaxWear ?? 0))
             error = ErrorCodes.Parameter; // (inferred) no dedicated honor-wall refusal code was recovered.
         if (error == 0 && badge!.IsPutOn != request.IsPutOn)
         {

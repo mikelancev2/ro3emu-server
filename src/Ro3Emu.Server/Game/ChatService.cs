@@ -30,12 +30,15 @@ public sealed partial class ChatService
     private readonly ChatFloodGuard _flood;
     private readonly ILogger<ChatService> _log;
     private readonly CheatMonitor _cheats;
+    private readonly TimeProvider _clock;
 
     public ChatService(GmCommands gm, FeedbackService feedback, GuildStore guilds, FriendStore friends, CharacterService character,
         GameData data, SessionRegistry sessions, IOptions<ServerOptions> options, ChatFloodGuard flood, ILogger<ChatService> log,
-        CheatMonitor cheats)
+        CheatMonitor cheats, TimeProvider clock)
     {
         this._cheats = cheats;
+        this._clock = clock;
+        this._nextMessageId = clock.GetUtcNow().ToUnixTimeMilliseconds();
         this._gm = gm; this._feedback = feedback; this._guilds = guilds; this._friends = friends; this._character = character; this._data = data;
         this._sessions = sessions; this._options = options; this._flood = flood; this._log = log;
         character.RegisterItemAction(SoundTransmissionAction, UseHornAsync, takesParam: true);
@@ -82,7 +85,7 @@ public sealed partial class ChatService
     private readonly Dictionary<string, HashSet<GameSession>> _groups = [];
     private readonly Dictionary<long, GameSession> _online = [];
     private readonly Dictionary<(long Sender, string Target, uint Type, string Content, string Extra), DateTimeOffset> _recentSends = [];
-    private long _nextMessageId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private long _nextMessageId;
     private static readonly TimeSpan RetransmitWindow = TimeSpan.FromSeconds(2);
 
     /// <summary>
@@ -111,7 +114,7 @@ public sealed partial class ChatService
             {
                 MessageId = Interlocked.Increment(ref _nextMessageId).ToString(),
                 SenderId = sender.Role!.Id.ToString(), ReceiveId = id,
-                SendTime = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                SendTime = (ulong)_clock.GetUtcNow().ToUnixTimeSeconds(),
                 Content = content, ExtraParam = extra,
             };
             Remember(message);
@@ -147,7 +150,7 @@ public sealed partial class ChatService
             Result = 0,
             UserSig = "ro3emu",
             SdkAppID = SdkAppId,
-            ExpireTime = DateTimeOffset.UtcNow.AddDays(1).ToUnixTimeSeconds(),
+            ExpireTime = _clock.GetUtcNow().AddDays(1).ToUnixTimeSeconds(),
         });
 
     /// <summary>
@@ -211,7 +214,7 @@ public sealed partial class ChatService
             return $"line of {req.Content.Length} characters (extra {req.ExtraParam.Length}) to {req.ReceiveId}";
         if (_gm.IsCommand(req.Content) && _gm.Allowed(sender)) return null; // a GM's command lines are not chat
         sender.ChatLines ??= RateBucket.Parse(limits.ChatLines) ?? new RateBucket(1, 10);
-        return sender.ChatLines.TryTake(Environment.TickCount64) ? null : $"line to {req.ReceiveId} over the chat rate";
+        return sender.ChatLines.TryTake(_clock.GetUtcNow().ToUnixTimeMilliseconds()) ? null : $"line to {req.ReceiveId} over the chat rate";
     }
 
     /// <summary>
@@ -338,7 +341,7 @@ public sealed partial class ChatService
 
     /// <summary>A line delivered on a group channel, with the ChatChannelType its id starts with ("2_guild"; quest
     /// target 103020, TaskService.MiscTargets.cs).</summary>
-    public List<Action<GameSession, int>> TextSent { get; } = [];
+    public SyncHook<GameSession, int> TextSent { get; } = new("ChatService.TextSent");
 
     private async Task SendTextAsync(GameSession sender, SendTextChatMessageRequest req)
     {
@@ -358,7 +361,7 @@ public sealed partial class ChatService
             MessageId = Interlocked.Increment(ref _nextMessageId).ToString(),
             SenderId = sender.Role!.Id.ToString(),
             ReceiveId = req.ReceiveId,
-            SendTime = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            SendTime = (ulong)_clock.GetUtcNow().ToUnixTimeSeconds(),
             Content = req.Content,
             ExtraParam = req.ExtraParam,
         };
@@ -434,7 +437,7 @@ public sealed partial class ChatService
         await DownAsync(sender, Cmd.SendText, new SendTextChatMessageResponse { ChatResult = true, Msg = message });
         if (req.ChatType != ChatTypePrivate && int.TryParse(req.ReceiveId.AsSpan(0, Math.Max(0, req.ReceiveId.IndexOf('_'))),
             NumberStyles.None, CultureInfo.InvariantCulture, out int channel))
-            foreach (var handler in TextSent) handler(sender, channel);
+            foreach (var handler in TextSent.Handlers) handler(sender, channel);
         // Every recipient gets the push, the sender included: the send response alone does not add the line.
         var push = new NotifyNewTextChatMessage { Msg = message };
         foreach (var to in recipients)
@@ -452,7 +455,7 @@ public sealed partial class ChatService
     private bool IsRetransmission(GameSession sender, SendTextChatMessageRequest req)
     {
         var key = (sender.Role!.Id, req.ReceiveId, (uint)req.ChatType, req.Content ?? "", req.ExtraParam ?? "");
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset now = _clock.GetUtcNow();
         lock (_sync)
         {
             (long, string, uint, string, string)[] expired =
@@ -497,7 +500,7 @@ public sealed partial class ChatService
             var message = new TextChatMessage
             {
                 MessageId = Interlocked.Increment(ref _nextMessageId).ToString(), SenderId = sender.Role.Id.ToString(),
-                ReceiveId = id, SendTime = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ReceiveId = id, SendTime = (ulong)_clock.GetUtcNow().ToUnixTimeSeconds(),
                 Content = content, ExtraParam = extra,
             };
             Remember(message);
@@ -520,7 +523,7 @@ public sealed partial class ChatService
         var message = new TextChatMessage
         {
             MessageId = Interlocked.Increment(ref _nextMessageId).ToString(), SenderId = sender.Role!.Id.ToString(),
-            ReceiveId = group, SendTime = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Content = content,
+            ReceiveId = group, SendTime = (ulong)_clock.GetUtcNow().ToUnixTimeSeconds(), Content = content,
             ExtraParam = JsonSerializer.Serialize(new
             {
                 templateId = 102,

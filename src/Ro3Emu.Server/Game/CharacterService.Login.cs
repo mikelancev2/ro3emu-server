@@ -34,7 +34,7 @@ public sealed partial class CharacterService
         session.BagState = new RoleBagState(roles.LoadBagState(role.Id));
         session.ItemCds.Clear();
         session.ItemGroupCds.Clear();
-        long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long nowMs = session.NowMs;
         foreach (var (id, end) in session.BagState.Info.ItemCds?.Data ?? new CdData().Data)
             if (id is > 0 and <= int.MaxValue && end > nowMs) session.ItemCds[(int)id] = end;
         foreach (var (id, end) in session.BagState.Info.ShareCds?.Data ?? new CdData().Data)
@@ -48,6 +48,7 @@ public sealed partial class CharacterService
         LoadEquipmentPlans(session);
         session.AutoDecompose = roles.LoadAutoDecompose(role.Id) is { } setting ? AutoDecomposeSetting.Parser.ParseFrom(setting) : new();
         session.Synced.Clear();
+        session.SyncedPacked.Clear();
         session.SentPropertyIds.Clear();
         session.NewItems.Clear();
         session.SyncVersions.Clear();
@@ -94,7 +95,7 @@ public sealed partial class CharacterService
                 var guids = (long[])receipts[receipt]!;
                 for (int i = 0; i < items.Count; i++) items[i].Guid = guids[i];
             });
-            foreach (var (entry, count) in gained) foreach (var handler in ItemGained) handler(session, entry, count);
+            foreach (var (entry, count) in gained) foreach (var handler in ItemGained.Handlers) handler(session, entry, count);
             Refresh(session);
         }
     }

@@ -32,9 +32,9 @@ public sealed partial class GuildService
         resp.Result = s.Role == null || g == null ? ErrorCodes.NotInGuild
             : req.Label == RecommendLabel.InviteJoinGuild
                 ? g.Status != (int)GuildStatus.Normal ? ErrorCodes.FeatureUnavailable
-                : !HasRight(g, s.Role.Id, 7) ? ErrorCodes.GuildPermission : 0
+                : !HasRight(g, s.Role.Id, GuildRight.Recruit) ? ErrorCodes.GuildPermission : 0
             : req.Label == RecommendLabel.InviteJoinGuildHelper
-                ? g.Status != (int)GuildStatus.PreCreate || g.Members[s.Role.Id].Official != 1 ? ErrorCodes.GuildPermission : 0
+                ? g.Status != (int)GuildStatus.PreCreate || g.Members[s.Role.Id].Official != GuildOfficial.Leader ? ErrorCodes.GuildPermission : 0
             : ErrorCodes.Parameter;
         if (resp.Result == 0 && _lastRecommendMs.TryGetValue(s.Role!.Id, out long last) && now - last < RecommendCooldownMs)
             resp.Result = ErrRecommendTooFrequent;
@@ -48,7 +48,7 @@ public sealed partial class GuildService
                 .Where(p => p.Progress!.Level >= g!.JoinLevelLimit && !(p.Guild?.CantBeInvited ?? false))
                 .Where(p => store.ForRole(p.Role!.Id) == null)
                 .OrderBy(p => Math.Abs(p.Progress!.Level - level)).ThenBy(p => p.Role!.Id)
-                .Take((int)Math.Clamp(Setting("GuildRecruitInviteListNum", 20)[0], 1, 100));
+                .Take((int)Math.Clamp((Data.Config.GuildSettings.Of(data).GuildRecruitInviteListNum ?? 20), 1, 100));
             resp.RecommendList.AddRange(picks.Select(p => new RecommendPlayerInfo
             { PlayerId = p.Role!.Id, Area = options.Value.ClusterId, IsInvited = invited.Contains(p.Role.Id) }));
         }

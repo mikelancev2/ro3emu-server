@@ -26,7 +26,7 @@ namespace Ro3Emu.Server.Game;
 /// ServerOptions.TitleCrestPercent, of the tier its level reaches (see CrestDrops). The PvP damage counter by title
 /// level (TitleBuffConfig, Formula_ATitleDamageAdd) is CombatService's TitleDamage.
 /// </summary>
-public sealed class TitleService
+public sealed partial class TitleService
 {
     public const uint Sync = 5031, Level = 43102;
     public const int Function = 14;
@@ -45,7 +45,7 @@ public sealed class TitleService
         this._options = options.Value;
         power.TitleId = s => s.TitleInfo?.TitleId ?? 0;
         character.TitleOf = s => s.TitleInfo?.TitleId ?? 0;
-        rewards.ExtraKillDrops.Add(CrestDrops);
+        rewards.ExtraKillDrops.Subscribe(CrestDrops);
         gm.Register("title", "set <rank> | info (title rank test aid)", GmAsync);
     }
 
@@ -94,13 +94,17 @@ public sealed class TitleService
         var saved = new DBTitleInfo { TitleId = next.Id };
         byte[] bytes = saved.ToByteArray();
         long role = s.Role!.Id;
-        var paid = await _character.ExchangeLockedAsync(s, cost, [], popup: false,
-            persist: tx =>
+        var paid = await _character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Cost = cost,
+            Popup = false,
+            Persist = tx =>
             {
                 tx.RoleBlob(role, "title", bytes);
                 tx.WithEconomy(_character.FamilyEconomy(s, "cd13a/character-title", cost, [], new { Title = next.Id }));
             },
-            committed: () => s.TitleInfo = saved);
+            Committed = () => s.TitleInfo = saved,
+        });
         if (paid == null) return ErrorCodes.ItemsShort;
         await CharacterService.SyncAsync(s, Sync, s.TitleInfo.Clone()); // an increment after the login's full sync
         await _character.RefreshStatsAsync(s);

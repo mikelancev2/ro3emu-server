@@ -20,9 +20,10 @@ public sealed partial class TerritoryWarsTests : IAsyncLifetime
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(12);
     private sealed class Clock : TimeProvider
     {
-        private long _seconds = 1779535900; // round 2 free auction, exported absolute calendar.
-        public override DateTimeOffset GetUtcNow() => DateTimeOffset.FromUnixTimeSeconds(Interlocked.Read(ref _seconds));
-        public void Set(long value) => Interlocked.Exchange(ref _seconds, value);
+        private long _ms = 1779535900L * 1000; // round 2 free auction, exported absolute calendar.
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.FromUnixTimeMilliseconds(Interlocked.Read(ref _ms));
+        public void Set(long value) => Interlocked.Exchange(ref _ms, value * 1000);
+        public void AdvanceMs(long ms) => Interlocked.Add(ref _ms, ms);
     }
     private readonly Clock _clock = new();
     private WebApplication _app = null!;
@@ -65,7 +66,7 @@ public sealed partial class TerritoryWarsTests : IAsyncLifetime
         var (web, micro, game) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = web; o.MicroGatePort = micro; o.GameGatePort = game; o.PlayBook = 101; o.SeasonStart = "2026-05-19";
         }, _clock);
         SureHitRolls.Install(_app); // lethal hits are prepared; a FLEE miss would only be noise
@@ -75,12 +76,6 @@ public sealed partial class TerritoryWarsTests : IAsyncLifetime
     {
         await _app.StopAsync(); await _app.DisposeAsync(); Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
-    }
-    private static string RepoRoot()
-    {
-        for (var p = new DirectoryInfo(AppContext.BaseDirectory); p != null; p = p.Parent)
-            if (File.Exists(Path.Combine(p.FullName, "Ro3Emu.slnx"))) return p.FullName;
-        throw new DirectoryNotFoundException();
     }
     private async Task<BotClient> Bot(string name, bool create = true)
     {
@@ -489,9 +484,7 @@ public sealed partial class TerritoryWarsTests : IAsyncLifetime
             {
                 // Reconcile must publish an actual full panel, even though its values have not changed.
                 session.Synced.Remove(5020);
-                typeof(TerritoryWarsService).GetField("_siegePublishedState",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-                    .SetValue(wars, "");
+                Service<SiegeService>().ResetPublishedStateForTest();
                 await wars.ReconcileAsync();
             });
             var panel = DBRoleSiegeDataIncrement.Parser.ParseFrom((await refresh.WaitAsync(Wait)).Body);

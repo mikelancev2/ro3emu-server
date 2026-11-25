@@ -25,7 +25,8 @@ public sealed partial class DailyActivityService : IGameTicker
     public const uint ActivitySync = 5004, StageSync = 5059, RingAccept = 43504, StageGain = 31178, StageBatchGain = 31175;
     private const int Liveness = 5, RingActivity = 3302, TodoFunction = 25, RingFunction = 5902;
     internal const int FashionStage = 3, LibraryStage = 4, ChickenStage = 6, TodoStage = 7, ChickenScore = 7; // GenericStageRewardsConfig._iType; item 7
-    private const int PowerStage = 1, TreasureStage = 8, PowerFunction = 48; // enum_StageRewardType BecomeStronger / SeasonTreasure
+    internal const int TreasureStage = 8; // enum_StageRewardType.SeasonTreasure
+    private const int PowerStage = 1, PowerFunction = 48; // enum_StageRewardType.BecomeStronger
     private const int RingRuns = 1; // PublicParamConfig.RunRingTaskRefreshCount (inferred as one accept per reset).
     private static readonly int[] RingStarts = [3001, 3011, 3021];
     private readonly GameData _data;
@@ -174,7 +175,7 @@ public sealed partial class DailyActivityService : IGameTicker
         var economy = new EconomyMutation(Guid.NewGuid().ToString("N"), session.Account!, session.Role!.Id,
             "cd13e/daily-reset", Convert.ToHexString(SHA256.HashData(outcome)),
             $"daily-reset/{session.Role.Id}/{previousDailyEpoch}/{daily}/{previousWeeklyEpoch}/{weekly}",
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            _clock.GetUtcNow().ToUnixTimeMilliseconds(),
             livenessSink > 0 ? [new EconomyQuantity(new(EconomyAssetKind.Currency, Liveness), livenessSink)] : [],
             [], outcome);
         string currencyBytes = string.Join(',', currency.Select(c => $"{c.Key}:{c.Value}"));
@@ -550,19 +551,15 @@ public sealed partial class DailyActivityService : IGameTicker
         }
     }
 
-    private long ToUnix(DateTime local) => new DateTimeOffset(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), _clock.LocalTimeZone.GetUtcOffset(local)).ToUnixTimeSeconds();
-    private long Boundary(DateTime now) => ToUnix(GameDay(now).AddHours(5));
-    private long WeekBoundary(DateTime now) => ToUnix(GameWeek(now).AddHours(5));
+    private long ToUnix(DateTime local) => GameCalendar.ToUnixSeconds(local, _clock.LocalTimeZone);
+    private long Boundary(DateTime now) => ToUnix(GameDay(now).AddHours(GameCalendar.ResetHour));
+    private long WeekBoundary(DateTime now) => ToUnix(GameWeek(now).AddHours(GameCalendar.ResetHour));
 
     /// <summary>The game day a realm-local time belongs to: it starts at 05:00 (Lua_TimeHelper.GetDayRefreshTime).</summary>
-    internal static DateTime GameDay(DateTime local) => local.TimeOfDay >= TimeSpan.FromHours(5) ? local.Date : local.Date.AddDays(-1);
+    internal static DateTime GameDay(DateTime local) => GameCalendar.GameDayOf(local).ToDateTime(TimeOnly.MinValue);
 
     /// <summary>The Monday of the game week (Monday 05:00) a realm-local time belongs to.</summary>
-    internal static DateTime GameWeek(DateTime local)
-    {
-        var day = GameDay(local);
-        return day.AddDays(-(((int)day.DayOfWeek + 6) % 7));
-    }
+    internal static DateTime GameWeek(DateTime local) => GameCalendar.GameWeekOf(local).ToDateTime(TimeOnly.MinValue);
 
     private static int Remaining(DailyState state) => DBDailyActivityInfo.Parser.ParseFrom(state.Rows).ActivityData.TryGetValue(RingActivity, out var row)
         ? row.ActivityInfo?.ActivityParam?.RunRingTask?.RemainRingCount ?? 0 : 0;

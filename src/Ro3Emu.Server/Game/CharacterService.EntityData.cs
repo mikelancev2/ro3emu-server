@@ -20,6 +20,7 @@ public sealed partial class CharacterService
     /// </summary>
     public void Refresh(GameSession session)
     {
+        session.StatsMemo = null; // a refresh publishes what changed: always from the inputs
         var stats = Stats(session);
         session.EntityProperties = EntityPropertiesOf(stats);
         session.EquipLook = EquipInfo(session);
@@ -67,9 +68,86 @@ public sealed partial class CharacterService
     /// AttributeConversionConfig per point of STR..LUK (_kAttribute2 for ranged jobs), grouped and rounded up.
     /// Current HP/SP come from the session (full when unset).
     /// </summary>
+    /// <summary>Set by ServerHost: the loop's <see cref="GameLoop.WorkSerial"/>. Unset, nothing is memoized.</summary>
+    internal Func<long>? WorkSerial { get; set; }
+    /// <summary>Set by ServerHost: the loop's 50 ms <see cref="GameLoop.TickSerial"/>.</summary>
+    internal Func<long>? TickSerial { get; set; }
+
+    /// <summary>Max ticks (4 * 50 ms = 200 ms) a hot-path memoized build sheet may be reused while all tracked inputs match.</summary>
+    private const long StatsMemoMaxTickAge = 4;
+
+    /// <summary>The build part of a sheet (before HP, SP and the dynamic properties) and what it was computed from.</summary>
+    private sealed record StatsMemoEntry(long Tick, RoleProgress Progress, int Career, long Level,
+        int S0, int S1, int S2, int S3, int S4, int S5, int ItemCount,
+        long SpeedBonus, long Mount, long? CurrentHp, long StatusBits, bool Dead, ActiveBuff[] Buffs,
+        StatSheet Sheet);
+
+    /// <summary>A combat/ticker path (cast, hit, swing, guardian pulse, team/power tick) allows <see cref="Stats"/> to reuse
+    /// the build part while tracked inputs are unchanged and no <see cref="Refresh"/> ran. Everywhere else (GM ops, trades,
+    /// equipment) the sheet is fresh.</summary>
+    internal void ReuseStatsInThisWork(GameSession session)
+    {
+        if (WorkSerial?.Invoke() is { } serial) session.StatsReuseSerial = serial;
+    }
+
+    /// <summary>
+    /// The character's full stat sheet. A cast, guardian pet pulse, team refresh and power probe read it repeatedly while
+    /// nothing it depends on changes. Within an allowed work item (<see cref="ReuseStatsInThisWork"/>) the build part is
+    /// memoized across up to <see cref="StatsMemoMaxTickAge"/> ticks (200 ms) while progress, career, level, base stats,
+    /// item count, buff list, HP, combat status, dead flag, mount and GM speed are unchanged, and dropped on every
+    /// <see cref="Refresh"/>. HP, SP and the dynamic properties are applied on every call.
+    /// </summary>
     public StatSheet Stats(GameSession session)
     {
         var p = session.Progress!;
+        long serial = WorkSerial?.Invoke() ?? -1;
+        if (serial != session.StatsReuseSerial) serial = -1; // not in a hot path's work: always fresh
+        long tick = TickSerial?.Invoke() ?? serial;
+        StatSheet sheet;
+        if (serial >= 0 && session.StatsMemo is StatsMemoEntry memo
+            && tick >= memo.Tick && tick - memo.Tick <= StatsMemoMaxTickAge
+            && Unchanged(memo, session, p))
+            sheet = memo.Sheet.Clone();
+        else
+        {
+            sheet = BuildStats(session, p);
+            if (serial >= 0)
+                session.StatsMemo = new StatsMemoEntry(tick, p, p.Career, p.Level,
+                    p.Stats[0], p.Stats[1], p.Stats[2], p.Stats[3], p.Stats[4], p.Stats[5],
+                    session.Items.Count, session.SpeedBonus, MountService.Rider(session),
+                    session.CurrentHp, session.StatusBits, session.Dead, [.. session.Buffs],
+                    sheet.Clone());
+        }
+        long maxHp = sheet[MaxHp], maxSp = sheet[MaxSp];
+        sheet[Hp] = Math.Clamp(session.CurrentHp ?? maxHp, 0, maxHp);
+        sheet[Sp] = Math.Clamp(session.CurrentSp ?? maxSp, 0, maxSp);
+        foreach (var provider in DynamicProperties.Handlers)
+            foreach (var (id, value) in provider(session))
+            {
+                // Independent active shield owners (totems and timed buffs) contribute to property 2003.
+                if (id == 2003) sheet[id] = (long)Math.Clamp((decimal)sheet[id] + value, 0, long.MaxValue);
+                else sheet[id] = value;
+            }
+        sheet[Lv] = p.Level;
+        return sheet;
+    }
+
+    private static bool Unchanged(StatsMemoEntry memo, GameSession session, RoleProgress p)
+    {
+        if (!ReferenceEquals(memo.Progress, p) || memo.Career != p.Career || memo.Level != p.Level
+            || memo.S0 != p.Stats[0] || memo.S1 != p.Stats[1] || memo.S2 != p.Stats[2]
+            || memo.S3 != p.Stats[3] || memo.S4 != p.Stats[4] || memo.S5 != p.Stats[5]
+            || memo.ItemCount != session.Items.Count
+            || memo.SpeedBonus != session.SpeedBonus || memo.Mount != MountService.Rider(session)
+            || memo.CurrentHp != session.CurrentHp || memo.StatusBits != session.StatusBits
+            || memo.Dead != session.Dead || memo.Buffs.Length != session.Buffs.Count) return false;
+        for (int i = 0; i < memo.Buffs.Length; i++)
+            if (!ReferenceEquals(memo.Buffs[i], session.Buffs[i])) return false;
+        return true;
+    }
+
+    private StatSheet BuildStats(GameSession session, RoleProgress p)
+    {
         var raw = new Dictionary<int, double>();
         void Add(long id, double v) => raw[(int)id] = raw.GetValueOrDefault((int)id) + v;
 
@@ -91,19 +169,7 @@ public sealed partial class CharacterService
 
         var sheet = EquipmentStunts.ApplyConversions(session, raw, data);
         if (matchAttributes == null) sheet = EmblemService.ApplyResonanceConversions(session, raw, sheet, data);
-        sheet = ApplySpeedOverflow(raw, sheet);
-        long maxHp = sheet[MaxHp], maxSp = sheet[MaxSp];
-        sheet[Hp] = Math.Clamp(session.CurrentHp ?? maxHp, 0, maxHp);
-        sheet[Sp] = Math.Clamp(session.CurrentSp ?? maxSp, 0, maxSp);
-        foreach (var provider in DynamicProperties)
-            foreach (var (id, value) in provider(session))
-            {
-                // Independent active shield owners (totems and timed buffs) contribute to property 2003.
-                if (id == 2003) sheet[id] = (long)Math.Clamp((decimal)sheet[id] + value, 0, long.MaxValue);
-                else sheet[id] = value;
-            }
-        sheet[Lv] = p.Level;
-        return sheet;
+        return ApplySpeedOverflow(raw, sheet);
     }
 
     /// <summary>AttributeConfig 30 "Other Elemental Damage Reduction%" and 31 "Crowd Control Resistance". Rows 20-24 of the
@@ -132,22 +198,21 @@ public sealed partial class CharacterService
     /// </summary>
     internal StatSheet ApplySpeedOverflow(Dictionary<int, double> raw, StatSheet sheet)
     {
-        var parameters = data.Table("PublicParamConfig");
-        if (!parameters.TryGetValue("FinalAtkSpdThdAndCastSpdThd", out var limits) || limits.ValueKind != JsonValueKind.Array
-            || limits.GetArrayLength() < 2) return sheet;
-        bool changed = false;
-        foreach (var (key, index) in new[] { ("OverflowAtkSpd2PhysDmgR", 0), ("OverflowCastSpd2MagicDmgR", 1) })
-        {
-            if (!parameters.TryGetValue(key, out var rule) || rule.ValueKind != JsonValueKind.Array || rule.GetArrayLength() < 5
-                || GameData.Number(limits[index]) is not { } threshold) continue;
-            var r = rule.EnumerateArray().Select(v => GameData.Number(v) ?? 0).ToArray();
-            (int source, double step, int target, double perStep, double cap) = ((int)r[0], r[1], (int)r[2], r[3], r[4]);
-            double excess = sheet[source] - threshold;
-            if (excess <= 0 || step <= 0) continue;
-            raw[target] = raw.GetValueOrDefault(target) + Math.Min(Math.Floor(excess / step) * perStep, cap);
-            changed = true;
-        }
+        var p = Data.Config.PublicParams.Of(data);
+        if (p.FinalAtkSpdThdAndCastSpdThd is not { Length: >= 2 } limits) return sheet;
+        bool changed = ApplyRule(p.OverflowAtkSpd2PhysDmgR, limits[0])
+            | ApplyRule(p.OverflowCastSpd2MagicDmgR, limits[1]);
         return changed ? StatCalculator.Compute(raw, data) : sheet;
+
+        bool ApplyRule(long[]? rule, long threshold)
+        {
+            if (rule is not { Length: >= 5 }) return false;
+            (int source, double step, int target, double perStep, double cap) = ((int)rule[0], rule[1], (int)rule[2], rule[3], rule[4]);
+            double excess = sheet[source] - threshold;
+            if (excess <= 0 || step <= 0) return false;
+            raw[target] = raw.GetValueOrDefault(target) + Math.Min(Math.Floor(excess / step) * perStep, cap);
+            return true;
+        }
     }
 
     /// <summary>The character's own raw contributions (gear, cards, talents, buffs, level and job rows, conversions).</summary>
@@ -224,7 +289,7 @@ public sealed partial class CharacterService
             if (id is >= 1 and <= 6) baseStats[id - 1] += value;
             else Add(id, value);
         }
-        foreach (var provider in ExtraAttributes)
+        foreach (var provider in ExtraAttributes.Handlers)
             foreach (var (id, value) in provider(session))
             {
                 if (id is >= 1 and <= 6) baseStats[id - 1] += value;
@@ -275,13 +340,13 @@ public sealed partial class CharacterService
     public Func<GameSession, long>? TitleOf { get; set; }
 
     /// <summary>Configured contributions from other owned systems (pet lineup/collection).</summary>
-    public List<Func<GameSession, IEnumerable<(long Id, double Value)>>> ExtraAttributes { get; } = [];
+    public OrderedHook<Func<GameSession, IEnumerable<(long Id, double Value)>>> ExtraAttributes { get; } = new("CharacterService.ExtraAttributes");
 
     /// <summary>A match owner's replacement build (null: the character's own), e.g. a Survivor Battle career.</summary>
     public Func<GameSession, IReadOnlyList<(long Id, double Value)>?>? MatchAttributes { get; set; }
 
     /// <summary>Runtime properties such as an absorb shield, projected on full stats and late AOI snapshots.</summary>
-    public List<Func<GameSession, IEnumerable<(int Id, long Value)>>> DynamicProperties { get; } = [];
+    public OrderedHook<Func<GameSession, IEnumerable<(int Id, long Value)>>> DynamicProperties { get; } = new("CharacterService.DynamicProperties");
 
     /// <summary>Set by BuffService: puts a buff on the player (item use action 203).</summary>
     public Func<GameSession, int, int, Task>? GiveBuff { get; set; }

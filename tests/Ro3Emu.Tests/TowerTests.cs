@@ -28,7 +28,7 @@ public sealed class TowerTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
             o.GameGatePort = gamePort;
@@ -44,7 +44,6 @@ public sealed class TowerTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -146,7 +145,7 @@ public sealed class TowerTests : IAsyncLifetime
                 // Controlled combat fixture: shorten the fight after asserting the configured spawn HP.
                 // The ordinary 31102 cast and shared damage/death callbacks still determine the outcome.
                 monster.Hp = 1;
-                monster.Advance(MonsterService.NowMs);
+                monster.Advance(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 monster.Moving = false;
                 monster.NextRoamMs = long.MaxValue;
                 position = monster.Pos;
@@ -517,8 +516,7 @@ public sealed class TowerTests : IAsyncLifetime
             if (ReferenceEquals(monster, final)) staged.TrySetResult();
             return Task.CompletedTask;
         };
-        var hooks = Service<CombatService>().BeforeKilled;
-        hooks.Insert(hooks.FindIndex(h => h.Target is RewardService), stageNotice);
+        using var stageSub = Service<CombatService>().BeforeKilled.Subscribe(stageNotice, order: -1);
         FailTowerWrites(true);
         await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = position, BStop = true, SpeedRate = 1 });
         await alice.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = 1000001, TargetId = final.Uid });
@@ -536,7 +534,7 @@ public sealed class TowerTests : IAsyncLifetime
             if (await Service<GameLoop>().InvokeAsync(() => Task.FromResult(final.Hp == 1 || final.Dead))) break;
             Assert.True(DateTime.UtcNow < until, "the refused kill never restored the monster's HP");
         }
-        hooks.Remove(stageNotice);
+        stageSub.Dispose();
         Assert.False(final.Dead);
         Assert.Equal(1, final.Hp);
         Assert.False(await Service<CharacterService>().RewardSourceCommittedAsync(final.RewardSource!.Key));
@@ -603,23 +601,19 @@ public sealed class TowerTests : IAsyncLifetime
                 }
                 return Task.CompletedTask;
             };
-            var hooks = Service<CombatService>().BeforeKilled;
-            hooks.Insert(hooks.FindIndex(h => h.Target is RewardService), failApply);
+            using var failSub = Service<CombatService>().BeforeKilled.Subscribe(failApply, order: -1);
             // Held from here on: the fault closes the connection, after which the registry may already have dropped it.
             var session = Session(alice);
-            try
-            {
-                await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = position, BStop = true, SpeedRate = 1 });
-                await alice.SendGameAsync(CombatService.UseSkill,
-                    new CastSkillReq { SkillId = 1000001, TargetId = final.Uid });
-                Assert.Equal(0, (await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser)).Result);
-                await staged.Task.WaitAsync(Wait);
-                await faulted.Task.WaitAsync(Wait);
-                // The child reward permit aborts first; the parent cast then finalizes the paid death.
-                for (int i = 0; i < 100 && (!session.Channel.PeerClosed || !final.Dead); i++) await Task.Delay(20);
-                Assert.True(session.Channel.PeerClosed);
-            }
-            finally { hooks.Remove(failApply); }
+            await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = position, BStop = true, SpeedRate = 1 });
+            await alice.SendGameAsync(CombatService.UseSkill,
+                new CastSkillReq { SkillId = 1000001, TargetId = final.Uid });
+            Assert.Equal(0, (await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser)).Result);
+            await staged.Task.WaitAsync(Wait);
+            await faulted.Task.WaitAsync(Wait);
+            // The child reward permit aborts first; the parent cast then finalizes the paid death.
+            for (int i = 0; i < 100 && (!session.Channel.PeerClosed || !final.Dead); i++) await Task.Delay(20);
+            Assert.True(session.Channel.PeerClosed);
+            failSub.Dispose();
             Assert.Equal(1, applyFaults);
             Assert.True(final.Dead);
             Assert.True(final.RewardSettlement!.Committed);
@@ -634,7 +628,6 @@ public sealed class TowerTests : IAsyncLifetime
         }
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         await InitializeAsync();
         await using var recovered = await InWorld("Alice", create: false);
         Assert.Null(Service<InstanceService>().Find(room));
@@ -742,6 +735,34 @@ public sealed class TowerTests : IAsyncLifetime
     }
 
     [ClientDataFact]
+    public async Task TheNextFloorMovesThePlayerBackToTheBornPointAfterTheReset()
+    {
+        await using var alice = await InWorld("Alice");
+        await Eligible(alice);
+        var first = await EnterFloor(alice, 1);
+        foreach (var monster in first.Monsters) await Kill(alice, monster.Uuid);
+        Assert.True((await Next(alice, TowerService.End, ClimTowerEndNotify.Parser)).ClimTowerResult);
+        var born = Service<WorldData>().Map(2100001)!.Born!.Value;
+        float walkedTo = 0;
+        await OnLoop(() => { walkedTo = Session(alice).Position.Z; return Task.CompletedTask; });
+        Assert.True(Math.Abs(walkedTo - born.Z) > 1, "the kills walked the player off the born point");
+
+        // LC_Actor_AutoAttack._resetScene pauses auto battle at the 30124; only _refreshAutoPathCache resumes it, and
+        // it runs on Unit.LocalPlayerGridChange alone, so the reset must be followed by a server move of the player.
+        long self = (long)alice.Self!.Uuid;
+        using var teleport = alice.Inbox.Expect(e => e.IsGame(GameAoiSink.MovementChange) && MovementChangeNtf.Parser.ParseFrom(e.Body).Uid == self);
+        await EnterFloor(alice, 2, inside: true);
+        var moved = await teleport.WaitAsync(Wait);
+        var move = MovementChangeNtf.Parser.ParseFrom(moved.Body);
+        Assert.Equal(MovementTransitionType.MoveTransForceTeleport, move.TransType);
+        Assert.Equal((born.X, born.Z), (move.MovementInfo.Pos.X, move.MovementInfo.Pos.Z));
+        var packets = alice.Inbox.Snapshot().ToList();
+        int reset = packets.FindLastIndex(e => e.IsGame(DungeonService.Reset)), started = packets.FindLastIndex(e => e.IsGame(TowerService.DungeonInfo));
+        Assert.InRange(packets.IndexOf(moved), reset + 1, started - 1);
+        await OnLoop(() => { Assert.Equal(born.Z, Session(alice).Position.Z); return Task.CompletedTask; });
+    }
+
+    [ClientDataFact]
     public async Task EveryWaveOccurrenceSurvivesExpansionAndExitCancelsTheRest()
     {
         var data = Service<GameData>();
@@ -799,13 +820,6 @@ public sealed class TowerTests : IAsyncLifetime
             await Task.Delay(20);
         }
         Assert.Fail("role did not disconnect");
-    }
-
-    private static string RepoRoot()
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) return dir.FullName;
-        throw new DirectoryNotFoundException("repository root");
     }
 
     /// <summary>

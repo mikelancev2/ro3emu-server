@@ -15,8 +15,10 @@ namespace Ro3Emu.Server.Game;
 /// </summary>
 public sealed partial class TeamService(SessionRegistry sessions, CharacterService character, ChatService chat, RoleStore roles, FriendStore friends,
     GameData data, SeasonService seasons, IOptions<ServerOptions> options, GameLoop loop, Maps.World world, ILogger<TeamService> log)
-    : IGameTicker
+    : IGameTicker, ICombatRule
 {
+    bool ICombatRule.IsSameParty(GameSession a, GameSession b) => a.Role is { } ar && b.Role is { } br
+        && TeamOf(ar.Id).TeamId is var team and not 0 && TeamOf(br.Id).TeamId == team;
     /// <summary>DungeonService supplies the authoritative role preference, allowances and Light of Bonds projection.</summary>
     public Func<GameSession, IReadOnlyList<long>, TeamMultiDungeonInfo>? MultiDungeonInfo { get; set; }
     public const uint TeamCreate = 42000, TeamLeave = 42001, TeamInvite = 42004, TeamNotifyInvitee = 42005, TeamInviteeResp = 42006,
@@ -87,15 +89,37 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
         return ExpBuff[Math.Clamp(sameMap, 1, ExpBuff.Length) - 1];
     }
 
+    /// <summary>The killer's party members on the killer's map line, online, alive and not loading a scene (PartyExpShare).</summary>
+    internal List<GameSession> SameMapMembers(GameSession killer)
+    {
+        if (killer.Role is not { } role || !_byMember.TryGetValue(role.Id, out var team)) return [];
+        return [.. team.Members.Where(m => m != role.Id).Select(Session).OfType<GameSession>()
+            .Where(s => s.WorldScene == killer.WorldScene && s.Progress != null && !s.Dead && !s.SceneLoading
+                && s.Attachment?.Cancelled != true)];
+    }
+
+    /// <summary>
+    /// Party item drop rate for a kill (‱): PublicParamConfig.TeamDropBuffWeights per member beyond the first on the same
+    /// map, the drop half of the party tip (Localization 24113-24116 via TeamBuffInfo: "2-player Party: ... Item drop rate
+    /// increased by 30%" up to 120% for five). That the rate scales each drop slot's chance is (inferred).
+    /// </summary>
+    public int DropBonus(GameSession killer)
+    {
+        if (killer.Role is not { } role || !_byMember.TryGetValue(role.Id, out var team)) return 10000;
+        int sameMap = team.Members.Count(m => Session(m) is { } s && s.WorldScene == killer.WorldScene);
+        long perMember = Data.Config.PublicParams.Of(_data).TeamDropBuffWeights ?? 0;
+        return (int)Math.Clamp(10000 + perMember * (Math.Clamp(sameMap, 1, ExpBuff.Length) - 1), 10000, 100000);
+    }
+
     /// <summary>After a party's roster or a member's card (career, online state) changed, with the roles it concerns: the
     /// members and one who left (PassiveSkills: Union).</summary>
-    internal List<Func<IReadOnlyList<long>, Task>> RosterChanged { get; } = [];
+    internal AsyncHook<IReadOnlyList<long>> RosterChanged { get; } = new("TeamService.RosterChanged");
 
     private async Task NotifyRosterAsync(IReadOnlyList<long> roles)
     {
         foreach (long role in roles)
             if (Session(role) is { } member) await SyncUnitTeamAsync(member);
-        foreach (var handler in RosterChanged) await handler(roles);
+        foreach (var handler in RosterChanged.Handlers) await handler(roles);
     }
 
     /// <summary>
@@ -162,7 +186,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
         var team = new Team
         {
             Id = ++_nextId, Type = req.TeamType == TeamType.Forty ? TeamType.Forty : TeamType.Five, Leader = self,
-            Target = req.TargetId != 0 ? req.TargetId : NoTarget, Created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Target = req.TargetId != 0 ? req.TargetId : NoTarget, Created = _loop.NowSec,
             Description = req.TeamDesc, Area = req.TeamAreaInfo.Length > 0 ? req.TeamAreaInfo : _options.Value.ClusterId.ToString(),
             MinBattlePoint = req.LimitScore, PlayBook = req.PlayBookId != 0 ? req.PlayBookId : _seasons.PlayBook,
         };
@@ -190,13 +214,13 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
         await s.SendGameAsync(TeamInvite, new InviteIntoTeamResp { Result = code });
         _log.LogInformation("{Name} invites {Target} to party: {Result}", s.Role.Name, req.Guid, ok ? "ok" : "refused");
         if (!ok) return;
-        DateTime expires = DateTime.UtcNow + InviteLife;
+        DateTime expires = _loop.Time.GetUtcNow().UtcDateTime + InviteLife;
         _invites[(req.Guid, team!.Id)] = expires;
         long invitedTeam = team.Id;
         _loop.ScheduleRuntime(InviteLife, () => RunTeamAsync("team/invite-expiry", [req.Guid], invitedTeam, () =>
         {
             if (_invites.TryGetValue((req.Guid, invitedTeam), out var current) && current == expires
-                && current <= DateTime.UtcNow) _invites.Remove((req.Guid, invitedTeam));
+                && current <= _loop.Time.GetUtcNow().UtcDateTime) _invites.Remove((req.Guid, invitedTeam));
             return Task.CompletedTask;
         }));
         var simple = new TeamTotalSimpleInfo { Info = Simple(team) };
@@ -210,7 +234,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
     private async Task InviteeRespCoreAsync(GameSession s, InviteeResp req)
     {
         long self = s.Role!.Id;
-        bool invited = _invites.TryGetValue((self, req.TeamId), out var expires) && expires > DateTime.UtcNow;
+        bool invited = _invites.TryGetValue((self, req.TeamId), out var expires) && expires > _loop.Time.GetUtcNow().UtcDateTime;
         if (!req.IsAgree)
         {
             _invites.Remove((self, req.TeamId));
@@ -292,7 +316,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
     {
         team.Applicants.Remove(role);
         team.Members.Add(role);
-        team.Joined[role] = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        team.Joined[role] = _loop.NowSec;
         _byMember[role] = team;
     }
 
@@ -423,6 +447,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
         var battle = new TeamMemberBattleInfo { Pos = new Vec3(), MaxHpValue = 1, MaxMpValue = 1 };
         if (s?.Progress != null)
         {
+            _character.ReuseStatsInThisWork(s);
             var stats = _character.Stats(s);
             battle.MaxHpValue = Math.Max(1, stats[MaxHp]);
             battle.MaxMpValue = Math.Max(1, stats[MaxSp]);
@@ -445,7 +470,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
 
     private static int Capacity(Team team) => team.Type == TeamType.Forty ? 40 : 5;
 
-    private GameSession? Session(long role) => _sessions.All().FirstOrDefault(s => s.Role?.Id == role);
+    private GameSession? Session(long role) => _sessions.ByRole(role);
 
     private async Task ToOthersAsync(Team team, long except, uint msgId, IMessage body)
     {

@@ -26,7 +26,7 @@ public sealed partial class TradeTests : IAsyncLifetime
         var (httpPort, microPort, gamePort) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = httpPort; o.MicroGatePort = microPort; o.GameGatePort = gamePort;
         }, _clock);
         await _app.StartAsync();
@@ -36,7 +36,6 @@ public sealed partial class TradeTests : IAsyncLifetime
     public async Task DisposeAsync()
     {
         await _app.StopAsync(); await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -358,13 +357,6 @@ public sealed partial class TradeTests : IAsyncLifetime
         Assert.Equal(0, (await Next(seller, TradeService.OwnBooth, CQueryPlayerBoothInfoResp.Parser)).Data.TotalCount);
     }
 
-    private static string RepoRoot()
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) return dir.FullName;
-        throw new DirectoryNotFoundException("repository root");
-    }
-
 
     private sealed class MutableClock : TimeProvider
     {
@@ -388,5 +380,39 @@ public sealed partial class TradeTests : IAsyncLifetime
         await loop.InvokeAsync(() => { market.CommittedForTest(); return Task.CompletedTask; });
         await loop.InvokeAsync(() => trade.TickMaintenanceAsync());
         Assert.Equal(passes + 1, trade.MaintenancePasses); // a market commit since the last pass
+    }
+
+    [ClientDataFact]
+    public async Task SellerCanDelistUsingBaseSkuIdAndAllInventoryFindsDivineTotems()
+    {
+        await using var seller = await InWorld("TotemSeller");
+        await using var buyer = await InWorld("TotemBuyer");
+        await Gm("totemseller", "!lvl 30"); await Gm("totembuyer", "!lvl 30");
+        await Gm("totemseller", "!item 17500101 1"); await Gm("totemseller", "!item 2 50000");
+        long guid = Assert.Single(Items(seller), i => i.Entry == 17500101).Guid;
+
+        await seller.SendGameAsync(TradeService.PutOn, new TradePutOnItemReq
+        { ItemGuid = guid, ItemPrice = 5000, CurrencyType = 1, Quantity = 1 });
+        var listed = await Next(seller, TradeService.PutOn, TradePutOnItemResp.Parser);
+        Assert.Equal(0, listed.Result);
+        var booth = Assert.Single(listed.BoothInfos);
+        Assert.False(string.IsNullOrEmpty(booth.BaseSkuId));
+        Assert.Equal(booth.SkuId, booth.BaseSkuId);
+
+        // Client queries AllInventory with special=0 (None) for Divine Totems even though SpecialTypeOf marks type 7.
+        var allReq = new CQueryAllItemInventoryInfoByItemIdRequest();
+        allReq.ItemInfo[0] = new TradeSpecialTypeInfo { Itemid = { "17500101" } };
+        await buyer.SendGameAsync(TradeService.QueryAllInventory, allReq);
+        var allResp = await Next(buyer, TradeService.QueryAllInventory, CAllItemInventoryInfoByItemIdResponse.Parser);
+        var info = Assert.Single(allResp.Data.ItemInfo[0].ItemInventoryInfos);
+        Assert.Equal(1, info.InventoryQuantity);
+
+        // Client sends CCommodityInfo.base_sku_id as TradePutOffItemReq.skuId when delisting.
+        await seller.SendGameAsync(TradeService.PutOff, new TradePutOffItemReq
+        { ItemId = 17500101, SkuId = booth.BaseSkuId, Quantity = 1 });
+        var delisted = await Next(seller, TradeService.PutOff, TradePutOffItemResp.Parser);
+        Assert.Equal(0, delisted.Result);
+        Assert.Empty(delisted.BoothInfos);
+        Assert.Contains(await Mail(seller, (long)seller.Self!.Uuid), m => m.Template == 1066);
     }
 }

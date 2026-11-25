@@ -24,13 +24,14 @@ public sealed partial class AuctionService(AuctionStore store, RoleStore roles, 
         QueryBonus = 82006, GetBonus = 82007, Get = 82009, Cancel = 82010, Quit = 82011, DungeonDone = 82012,
         DungeonChanged = 82013, BatchBid = 82014, HasAuto = 82015, Resume = 82016, PreStack = 82017,
         BatchCancel = 82018, Count = 82019, Reddot = 82020;
+    public const int Function = 4, DungeonFunction = 401, WorldFunction = 402; // FunctionConfig: auction
 
     private readonly ConcurrentDictionary<long, byte> _pendingReady = new();
     internal Func<Task>? BeforeNoticeForTest { get; set; }
     private long Now => clock.GetUtcNow().ToUnixTimeSeconds();
-    private int RecordLimit => (int)Math.Clamp(Param("AuctionRecordLimit", 50), 1, 500);
+    private int RecordLimit => (int)Math.Clamp((Data.Config.PublicParams.Of(data).AuctionRecordLimit ?? 50), 1, 500);
     // UI_Sys_AuctionRecordPanelCtrl.lua:418-425 caps the World record list at WorldAuctionNumber (300).
-    private int WorldRecordLimit => (int)Math.Clamp(Param("WorldAuctionNumber", 300), 1, 1000);
+    private int WorldRecordLimit => (int)Math.Clamp((Data.Config.PublicParams.Of(data).WorldAuctionNumber ?? 300), 1, 1000);
 
     public int DungeonSrcType(int difficulty) => (int)data.Table("AuctionTabConfig").Values
         .Where(row => GameData.Int(row, "_iAuctionType") == (int)AuctionType.Dungeon
@@ -39,8 +40,6 @@ public sealed partial class AuctionService(AuctionStore store, RoleStore roles, 
         .Select(row => GameData.Int(row, "_iID")).FirstOrDefault();
 
     public IReadOnlyList<AuctionStore.Item> DungeonRows(long runId) => [.. store.RunItems(runId)];
-    private long Param(string key, long fallback) => data.Table("PublicParamConfig").TryGetValue(key, out var v)
-        ? (long)(GameData.Number(v) ?? fallback) : fallback;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -79,9 +78,9 @@ public sealed partial class AuctionService(AuctionStore store, RoleStore roles, 
                 try { await MarkDungeonRunReadyAsync(id); }
                 catch (Exception e) { log.LogWarning(e, "Dungeon auction ready marker retry deferred for {Run}", id); }
             }
-            foreach (var run in store.PendingRuns().Where(r => r.Ready)) await FinalizeDungeonRunAsync(run.Id);
+            foreach (var run in (await store.PendingRunsAsync()).Where(r => r.Ready)) await FinalizeDungeonRunAsync(run.Id);
             await ProcessPrebuysAsync();
-            foreach (var row in store.OpenItems().Where(r => r.End <= Now
+            foreach (var row in (await store.OpenItemsAsync()).Where(r => r.End <= Now
                 && r.SettlementRecoveryReason.Length == 0))
                 await SettleAsync(row.Id);
         }
@@ -231,7 +230,7 @@ public sealed partial class AuctionService(AuctionStore store, RoleStore roles, 
                     int basePrice = (int)GameData.Int(cfg, "_iDungeonPrice");
                     int max = (int)GameData.Int(cfg, "_iDungeonPriceMax");
                     long duration = Math.Max(1, GameData.Int(cfg, "_iTimeLast"));
-                    long start = Now + Math.Max(0, Param("GamePlayAuctionAwaitTime", 30));
+                    long start = Now + Math.Max(0, (Data.Config.PublicParams.Of(data).GamePlayAuctionAwaitTime ?? 30));
                     store.EnlistSave(new AuctionStore.Item
                     {
                         SourceKey = $"dungeon:{run.Id}:{index++}", Type = AuctionType.Dungeon,
@@ -271,14 +270,16 @@ public sealed partial class AuctionService(AuctionStore store, RoleStore roles, 
             catch (Exception e) { log.LogWarning(e, "Auction red dot failed for {Role}", role); }
     }
 
-    private bool Visible(GameSession s, AuctionStore.Item r)
+    private bool Visible(GameSession s, AuctionStore.Item r) => Visible(s, r, null);
+
+    private bool Visible(GameSession s, AuctionStore.Item r, long? roleGuildId)
     {
         // (inferred) FunctionConfig 402 "World Auction" (parent 4) gates World rows as 401 gates Dungeon rows.
-        if (s.Role == null || !functions.IsOpen(s, 4) || r.Type == AuctionType.Dungeon && !functions.IsOpen(s, 401)
-            || r.Type == AuctionType.World && !functions.IsOpen(s, 402))
+        if (s.Role == null || !functions.IsOpen(s, Function) || r.Type == AuctionType.Dungeon && !functions.IsOpen(s, DungeonFunction)
+            || r.Type == AuctionType.World && !functions.IsOpen(s, WorldFunction))
             return false;
         if (r.Type == AuctionType.Dungeon) return r.Eligible.Contains(s.Role.Id);
-        if (r.Type == AuctionType.Guild) return guilds.ForRole(s.Role.Id)?.Id == r.GuildId;
+        if (r.Type == AuctionType.Guild) return (roleGuildId ?? guilds.GuildIdOf(s.Role.Id)) == r.GuildId && r.GuildId != 0;
         return r.Type is AuctionType.World or AuctionType.Act;
     }
 
@@ -339,13 +340,18 @@ public sealed partial class AuctionService(AuctionStore store, RoleStore roles, 
         long requestRole = s.Role?.Id ?? 0;
         var requestLease = s.Attachment;
         QuerySelfAuctionRes res;
-        using (var scope = await EnterSessionAuctionAsync(s, "auction/self-read", role => ReadKeys(role,
-            store.ItemsOfType(req.AuctionType).Where(r => Visible(s, r)
-                && (r.Type == AuctionType.Dungeon || r.Joined.Contains(role) || r.Owner == role)))))
+        using (var scope = await EnterSessionAuctionAsync(s, "auction/self-read", role =>
         {
+            long? guildId = req.AuctionType == AuctionType.Guild ? guilds.GuildIdOf(role) : null;
+            return ReadKeys(role, store.ItemsOfType(req.AuctionType).Where(r => Visible(s, r, guildId)
+                && (r.Type == AuctionType.Dungeon || r.Joined.Contains(role) || r.Owner == role)));
+        }))
+        {
+            long roleId = s.Role!.Id;
+            long? guildId = req.AuctionType == AuctionType.Guild ? guilds.GuildIdOf(roleId) : null;
             res = new QuerySelfAuctionRes { AuctionType = req.AuctionType };
-            res.SelfAuctions.Add(store.ItemsOfType(req.AuctionType).Where(r => Visible(s, r)
-                && (r.Type == AuctionType.Dungeon || r.Joined.Contains(s.Role!.Id) || r.Owner == s.Role.Id))
+            res.SelfAuctions.Add(store.ItemsOfType(req.AuctionType).Where(r => Visible(s, r, guildId)
+                && (r.Type == AuctionType.Dungeon || r.Joined.Contains(roleId) || r.Owner == roleId))
                 .OrderByDescending(r => r.LastBid).Select(r => View(s, r)));
         }
         // The recovered no_decode_default_array client Lua iterates nil for a truly empty repeated field.

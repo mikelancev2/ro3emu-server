@@ -10,6 +10,7 @@ using Ro3Emu.Bot;
 using Ro3Emu.Server;
 using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Game;
 using Ro3Emu.Server.Maps;
 
@@ -39,7 +40,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.SeasonStart = "2026-10-08";
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
@@ -54,7 +55,6 @@ public sealed partial class DungeonTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -283,11 +283,20 @@ public sealed partial class DungeonTests : IAsyncLifetime
         {
             var dead = Session(bob);
             dead.Dead = true; // controlled death fixture through the same registered owner callbacks
-            foreach (var handler in Service<CombatService>().PlayerDied) await handler(dead);
+            await Service<CombatService>().PlayerDied.InvokeAsync(dead);
         });
         var noRevive = await Next(bob, DungeonService.ReviveInfo, SyncClientPlayerReviveInfoNtf.Parser, info => info.BDead);
         Assert.Equal(0, noRevive.ReviveTime);
-        Assert.Equal(ErrorCodes.FeatureUnavailable, Service<DungeonService>().ExternalReviveError(Session(bob)));
+        // NoRevive refuses Bob's own revive, not a teammate's: the boss's count is the party's.
+        Assert.Equal(0, Service<DungeonService>().ExternalReviveError(Session(bob)));
+        await OnLoop(() =>
+        {
+            var attempt = Session(bob).DungeonAttempt!;
+            attempt.RevivesUsed[Session(alice).Role!.Id] = (int)new TenGameplayBossConfig(attempt.Plan.Boss!.Value).OriginalReviveNum;
+            Assert.Equal(ErrorCodes.PartyRevivesUsedUp, Service<DungeonService>().ExternalReviveError(Session(bob)));
+            attempt.RevivesUsed.Clear();
+            return Task.CompletedTask;
+        });
         await bob.SendGameAsync(CombatService.Relive, new EntityReliveReq());
         Assert.Equal(ErrorCodes.FeatureUnavailable,
             (await Next(bob, CombatService.Relive, EntityReliveAck.Parser)).Result);
@@ -467,7 +476,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
         {
             var dead = Session(alice);
             dead.Dead = true;
-            foreach (var handler in Service<CombatService>().PlayerDied) await handler(dead);
+            await Service<CombatService>().PlayerDied.InvokeAsync(dead);
         });
         var autoRevive = await Next(alice, DungeonService.ReviveInfo, SyncClientPlayerReviveInfoNtf.Parser,
             info => info.BDead);
@@ -518,7 +527,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
         {
             var dead = Session(alice);
             dead.Dead = true;
-            foreach (var handler in Service<CombatService>().PlayerDied) await handler(dead);
+            await Service<CombatService>().PlayerDied.InvokeAsync(dead);
         });
         var revive = await Next(alice, DungeonService.ReviveInfo, SyncClientPlayerReviveInfoNtf.Parser,
             info => info.BDead);
@@ -577,7 +586,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
         var born = Service<WorldData>().Map(story)!.Born!.Value;
         string original = Service<GameData>().Row("DungeonConfig", story)!.Value
             .GetProperty("_kResSceneEditorName").GetString()!;
-        string source = Path.Combine(RepoRoot(), "data", "sceneeditor", original + ".json");
+        string source = Path.Combine(ClientData.RepoRoot, "data", "sceneeditor", original + ".json");
         string directory = Path.Combine(_dataDir, "sceneeditor");
         Directory.CreateDirectory(directory);
         string stem = Path.Combine(directory, "synthetic_1054001");
@@ -693,7 +702,8 @@ public sealed partial class DungeonTests : IAsyncLifetime
                 if (ReferenceEquals(monster, fourthBoss)) settled.TrySetResult();
                 return Task.CompletedTask;
             };
-            await OnLoop(() => { Service<CombatService>().Killed.Add(observeSettlement); return Task.CompletedTask; });
+            IDisposable? sub = null;
+            await OnLoop(() => { sub = Service<CombatService>().Killed.Subscribe(observeSettlement); return Task.CompletedTask; });
             try
             {
                 await Kill(alice, fourthBoss);
@@ -703,7 +713,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
             }
             finally
             {
-                await OnLoop(() => { Service<CombatService>().Killed.Remove(observeSettlement); return Task.CompletedTask; });
+                sub?.Dispose();
             }
             // A repeated failed delivery must keep the same entitlement and publish no result.
             await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() =>
@@ -759,13 +769,6 @@ public sealed partial class DungeonTests : IAsyncLifetime
         public override DateTimeOffset GetUtcNow() => Now.ToUniversalTime();
         public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
         public void Advance(TimeSpan by) => Now = Now.Add(by);
-    }
-
-    private static string RepoRoot()
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) return dir.FullName;
-        throw new DirectoryNotFoundException("repository root");
     }
 
 }

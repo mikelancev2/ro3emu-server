@@ -19,7 +19,7 @@ namespace Ro3Emu.Server.Game;
 /// day N of _kStage [30, N] opens N-1 local 05:00 days later; a task's _iPoint is scored when its reward is claimed;
 /// isAllTaskComplete = every listed task claimed; the configured window (TimeLimit 1010) is permanent, so days never close.
 /// </summary>
-public sealed class FirstHeartService : IGameTicker
+public sealed partial class FirstHeartService : IGameTicker
 {
     public const uint Sync = 5049, GetTaskReward = 83500, GetScoreReward = 83501;
     public const long Activity = 114;
@@ -70,9 +70,9 @@ public sealed class FirstHeartService : IGameTicker
                 _taskRows[GameData.Int(r, "_iID")] = new TaskRow(GameData.Int(r, "_iID"), GameData.Int(r, "_iType"),
                     GameData.Int(r, "_iPoint"), GameData.Int(r, "_iAward"),
                     [.. targets[0].EnumerateArray().Select(v => (long)(GameData.Number(v) ?? 0))]);
-        character.StateChanged.Add(MarkDirty);
-        character.ProgressHandlers.Add(s => { MarkDirty(s); return Task.CompletedTask; });
-        cards.CollectionChanged.Add(s => { MarkDirty(s); return Task.CompletedTask; });
+        character.StateChanged.Subscribe(MarkDirty);
+        character.ProgressHandlers.Subscribe(s => { MarkDirty(s); return Task.CompletedTask; });
+        cards.CollectionChanged.Subscribe(s => { MarkDirty(s); return Task.CompletedTask; });
         gm.Register("firstheart", "day <n> | reset | info (Seven-Day Goal test aid: move the start so day n is open)", GmAsync);
     }
 
@@ -99,9 +99,9 @@ public sealed class FirstHeartService : IGameTicker
     /// <summary>Day number since the start: local days that begin at 05:00, the realm's daily reset (inferred).</summary>
     private int DayNumber(long start)
     {
-        DateTime LocalDay(long seconds) =>
-            TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeSeconds(seconds), _clock.LocalTimeZone).DateTime.AddHours(-5).Date;
-        return (LocalDay(Now) - LocalDay(start)).Days + 1;
+        DateOnly LocalDay(long seconds) =>
+            GameCalendar.GameDayOf(DateTimeOffset.FromUnixTimeSeconds(seconds), _clock.LocalTimeZone);
+        return LocalDay(Now).DayNumber - LocalDay(start).DayNumber + 1;
     }
 
     /// <summary>A target's (current, required): login days from the achievement count, the rest from task snapshots.</summary>

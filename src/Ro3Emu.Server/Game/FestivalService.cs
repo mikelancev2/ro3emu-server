@@ -18,9 +18,10 @@ namespace Ro3Emu.Server.Game;
 /// question ordering, a 30-second answer / 5-second reveal cadence, tied ranks and automatic reward delivery
 /// are (inferred). Position at the deadline is authoritative; a client event cannot answer or award the quiz.
 /// </summary>
-public sealed class FestivalService : IGameTicker
+public sealed partial class FestivalService : IGameTicker
 {
     public const int ActivityId = 3301;
+    public const int Function = 5901; // FunctionConfig: Festival Invitation
     public const long Dungeon = 1010002;
     private readonly GameData _data;
     private readonly AccountStore _accounts;
@@ -106,9 +107,9 @@ public sealed class FestivalService : IGameTicker
                         }
             }
         }
-        daily.EventProjections.Add(Project);
-        scene.Loaded.Add(LoadedAsync);
-        scene.Leaving.Add(LeavingAsync);
+        daily.EventProjections.Subscribe(Project);
+        scene.Loaded.Subscribe(LoadedAsync);
+        scene.Leaving.Subscribe(LeavingAsync);
     }
 
     private ActivityClock.Window? Segment => _clock.Segments(1083, Now).FirstOrDefault(w => w.Contains(Now));
@@ -194,7 +195,7 @@ public sealed class FestivalService : IGameTicker
         if (active.State == "Candidate" && !next!.Complete)
         {
             int maximum = _data.Row("DungeonConfig", Dungeon) is { } config ? checked((int)Math.Max(1, GameData.Int(config, "_iRoleCntLimit"))) : 20;
-            foreach (var s in _sessions.All().Where(s => s.Role != null && s.ActivitiesReady && s.DailyReady && _functions.IsOpen(s, 5901)).OrderBy(s => s.Role!.Id))
+            foreach (var s in _sessions.All().Where(s => s.Role != null && s.ActivitiesReady && s.DailyReady && _functions.IsOpen(s, Function)).OrderBy(s => s.Role!.Id))
             {
                 if (next.Candidates.Count >= maximum) break;
                 changed |= next.Candidates.TryAdd(s.Role!.Id, new());
@@ -249,7 +250,7 @@ public sealed class FestivalService : IGameTicker
             await EnsureRoundAsync();
             result = req.ActivityId != ActivityId || req.RainbowKoiBet == null || session.Role == null ? ErrorCodes.Parameter
                 : !session.ActivitiesReady ? ErrorCodes.FeatureUnavailable
-                : !_functions.IsOpen(session, 5901) ? ErrorCodes.FunctionLocked
+                : !_functions.IsOpen(session, Function) ? ErrorCodes.FunctionLocked
                 : !_schedule.IsOpen(ActivityId) || Segment?.State != "Ready" || _current == null || _current.Complete ? ErrorCodes.ActivityPeriod
                 : !_current.Candidates.TryGetValue(req.RainbowKoiBet.TargetPlayerId, out var target) || target.GiveUp ? ErrorCodes.Parameter
                 : _current.Bets.ContainsKey(session.Role.Id) ? ErrorCodes.RewardClaimed : 0;
@@ -281,7 +282,7 @@ public sealed class FestivalService : IGameTicker
         {
             await EnsureRoundAsync();
             int error = !session.ActivitiesReady ? ErrorCodes.FeatureUnavailable
-                : session.Role == null || !_functions.IsOpen(session, 5901) ? ErrorCodes.FunctionLocked
+                : session.Role == null || !_functions.IsOpen(session, Function) ? ErrorCodes.FunctionLocked
                 : session.SceneLoading ? ErrorCodes.SwitchingScenes
                 : session.InstanceId != 0 ? ErrorCodes.DungeonBusy
                 : session.Dead || !_schedule.IsOpen(ActivityId) || Segment?.State is not ("Candidate" or "Ready")
@@ -490,7 +491,7 @@ public sealed class FestivalService : IGameTicker
                     Asset(grant.Entry), grant.Count))).ToArray();
             transaction.WithEventEconomy(new EventEconomyMutation(catalog, Guid.NewGuid().ToString("N"),
                 "realm", 0, "event/festival-complete", $"festival/{r.Cycle}/complete",
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), [], goods, deltas,
+                _loop.NowMs, [], goods, deltas,
                 JsonSerializer.SerializeToUtf8Bytes(new { r.Cycle, Rows = frozen.Count })));
         }
         await transaction.CommitAsync(_accounts, "festival/complete", _ => _current = r);
@@ -508,7 +509,7 @@ public sealed class FestivalService : IGameTicker
         if (winners <= 0) return 0;
         if (KoiBetRewardConfig.All(_data).FirstOrDefault(t => t.WinnerMin <= winners && (t.WinnerMax < 0 || winners <= t.WinnerMax))
             is { AwardId: > 0 } tier) return tier.AwardId;
-        return _data.Table("PublicParamConfig").TryGetValue("LuckyAwardPreview", out var preview) ? (long)(GameData.Number(preview) ?? 0) : 0;
+        return Data.Config.PublicParams.Of(_data).LuckyAwardPreview ?? 0;
     }
 
     private async Task DeliverAsync(GameSession session)

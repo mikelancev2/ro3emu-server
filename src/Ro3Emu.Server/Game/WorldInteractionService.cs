@@ -10,7 +10,7 @@ namespace Ro3Emu.Server.Game;
 /// NPC-owned gameplay states. NPCInteractConfig selects GameplayStatusConfig; VehicleConfig selects the
 /// VehicleSeatConfig rows. LC_GamePlayStatusMgr.lua:876-931 consumes 32702, and LC_VehicleServer.lua:143-167 sends 32708.
 /// </summary>
-public sealed class WorldInteractionService
+public sealed partial class WorldInteractionService
 {
     public const uint Change = 32702, Action = 32703, Change3C = 32704,
         SeatChange = 32708, VehicleSync = 31074;
@@ -38,9 +38,9 @@ public sealed class WorldInteractionService
         this._worldData = worldData;
         scene.ValidateInteraction = ValidateInteraction;
         scene.ApplyInteraction = ApplyInteractionAsync;
-        scene.Leaving.Add(LeaveAsync);
+        scene.Leaving.Subscribe(LeaveAsync);
         // MiniMap_ServerCellWidget refuses line changes while interacting (client lines 350-377).
-        scene.LineSwitchChecks.Add(s => _active.ContainsKey(s) ? ErrorCodes.NpcParameter : 0);
+        scene.LineSwitchChecks.Subscribe(s => _active.ContainsKey(s) ? ErrorCodes.NpcParameter : 0);
         world.PlayerEntered.Add(PlayerEnteredAsync);
     }
 
@@ -289,7 +289,7 @@ public sealed class WorldInteractionService
     private async Task SceneActorCarryAsync(GameSession s, Active state, bool seated)
     {
         long type = VehicleSeatConfig.Get(_data, VehicleSeats(state)[state.SeatIndex])?.Type ?? 0;
-        var total = new AoIInfoTotal { AoITickMs = 50, TickNowMs = (ulong)MonsterService.NowMs };
+        var total = new AoIInfoTotal { AoITickMs = 50, TickNowMs = (ulong)_world.NowMs };
         var rider = new AoICarry { Id = (ulong)s.Role!.Id, CarrySlot = state.SeatIndex, CarryOffset = new Vec3(), CarryType = (int)type };
         total.AoiData.Add(new AoIInfoSingle
         {

@@ -27,6 +27,8 @@ public sealed partial class SkillService
     private readonly GameData _data;
     private readonly CharacterService _character;
     private readonly RoleStore _roles;
+    private readonly TimeProvider _clock;
+    internal TimeProvider Clock => _clock;
     private readonly ILogger<SkillService> _log;
     private Dictionary<(int Group, int Level), int>? _rowIds;
     private Dictionary<int, int>? _upgradedGroupByBase;
@@ -35,14 +37,18 @@ public sealed partial class SkillService
     public Func<GameSession, int, bool>? QueueEligibility { get; set; }
     /// <summary>Ordinary pet guardian projection; LC_System_Skill consumes whellSkills[SkillWheelPet].</summary>
     internal Func<GameSession, SkillWheelSlot?>? PetWheel { get; set; }
+    /// <summary>A flying mount's take-off/landing pair; JoyStickSkillNormalMixin shows them from
+    /// whellSkills[SkillWheelMount1/2] only, so without this the HUD never offers the buttons.</summary>
+    internal Func<GameSession, (SkillWheelSlot Up, SkillWheelSlot Down)?>? MountFlyWheel { get; set; }
 
-    public SkillService(GameData data, CharacterService character, RoleStore roles, ILogger<SkillService> log)
+    public SkillService(GameData data, CharacterService character, RoleStore roles, TimeProvider clock, ILogger<SkillService> log)
     {
         this._data = data;
         this._character = character;
         this._roles = roles;
+        this._clock = clock;
         this._log = log;
-        character.ProgressHandlers.Add(SyncAsync);
+        character.ProgressHandlers.Subscribe(SyncAsync);
     }
 
     /// <summary>SkillConfig row id of a group at a level (mode 0), or 0.</summary>
@@ -63,7 +69,15 @@ public sealed partial class SkillService
     /// The career's normal attack: JobConfig._kSkillNormalID (a row id). (inferred) The Magician careers name 1200001, which has
     /// no SkillConfig row; those take their unarmed JobAttackConfig row, the career's or the nearest parent's.
     /// </summary>
-    public int NormalAttack(int career)
+    public int NormalAttack(int career) => _normalAttacks.GetOrAdd(career, FindNormalAttack);
+
+    // Level() asks for the career's attack group on every passive of every stat sheet; both are fixed per career.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, int> _normalAttacks = new(), _attackGroups = new();
+
+    private int AttackGroup(int career) => _attackGroups.GetOrAdd(career, c =>
+        _data.Row("SkillConfig", NormalAttack(c)) is { } atk ? (int)GameData.Int(atk, "_iSkillID") : -1);
+
+    private int FindNormalAttack(int career)
     {
         int named = _data.Row("JobConfig", career) is { } job && job.TryGetProperty("_kSkillNormalID", out var n) && n.ValueKind == JsonValueKind.Array && n.GetArrayLength() > 0
             ? n[0].GetInt32() : 1000001;
@@ -146,9 +160,6 @@ public sealed partial class SkillService
         return activation <= 0 || p.Level >= activation ? (int)GameData.Int(row, "_iInitialLevel") : 0;
     }
 
-    private int Parameter(string key, int fallback) => _data.Table("PublicParamConfig").TryGetValue(key, out var value)
-        && GameData.Number(value) is { } number && number > 0 ? (int)number : fallback;
-
     /// <summary>Skill points per job rank: earned from JobLvConfig._iSkillPoint (whole earlier ranks, current rank up to the job level) minus spent.</summary>
     private Dictionary<int, int> SkillPoints(RoleProgress p)
     {
@@ -188,8 +199,7 @@ public sealed partial class SkillService
     public int Level(RoleProgress p, int group)
     {
         int initial = InTree(p.Career, group) ? Initial(p, group) : 0;
-        if (_data.Row("SkillConfig", NormalAttack(p.Career)) is { } atk && GameData.Int(atk, "_iSkillID") == group)
-            initial = Math.Max(1, initial);
+        if (AttackGroup(p.Career) == group) initial = Math.Max(1, initial);
         if (TreeAttackGroups(p.Career).Contains(group)) initial = Math.Max(1, initial);
         if (group > 0 && group == QueueGroup(p.Career)) initial = Math.Max(1, initial); // everyone has the Lineup button
         int saved = Math.Max(p.Skills.GetValueOrDefault(group), p.GrantedSkills.GetValueOrDefault(group));
@@ -341,7 +351,7 @@ public sealed partial class SkillService
             ImportLegacyLoads(source, "Auto", "AutoLevels", plan.AutoLoadSkill, plan, session.Progress!);
             var queueLevels = JsonMap(source, "QueueLevels");
             foreach (var (slot, group) in JsonMap(source, "Queue"))
-                if (slot >= 0 && slot < Parameter("QueueNum", 12))
+                if (slot >= 0 && slot < (int)(Data.Config.PublicParams.Of(_data).QueueNum ?? 12))
                     plan.SkillQueue[slot] = new SkillData
                     {
                         SkillId = group,
@@ -480,6 +490,11 @@ public sealed partial class SkillService
         }
         if (PetWheel?.Invoke(session) is { } pet)
             state.SkillWheel.WhellSkills[(int)SkillWheelSlotType.SkillWheelPet] = pet;
+        if (MountFlyWheel?.Invoke(session) is { } fly)
+        {
+            state.SkillWheel.WhellSkills[(int)SkillWheelSlotType.SkillWheelMount1] = fly.Up;
+            state.SkillWheel.WhellSkills[(int)SkillWheelSlotType.SkillWheelMount2] = fly.Down;
+        }
         state.OriginSkillWheel = state.SkillWheel.Clone();
         return state;
     }
@@ -722,7 +737,7 @@ public sealed partial class SkillService
             if (result == 0 && req.Plan != session.SkillPlans!.CurrentPlanIndex)
             {
                 await CommitAsync(session, next, progress, "cd13c/skill-switch",
-                    () => session.SkillPlanSwitchUtc = DateTime.UtcNow);
+                    () => session.SkillPlanSwitchUtc = _clock.GetUtcNow().UtcDateTime);
                 changed = true;
             }
             await session.SendGameAsync(SwitchPlan, new SwitchPlanResp { Result = result, Plan = req.Plan, Flag = 0 });
@@ -736,7 +751,7 @@ public sealed partial class SkillService
         using var held = await CharacterService.Lock(session);
         int result = req.Plan is < 0 or >= PlanCount || !session.SkillPlans!.SkillAssignPlans[req.Plan].IsUnlock
             || string.IsNullOrWhiteSpace(req.Name) || req.Name.Any(char.IsControl)
-            || req.Name.EnumerateRunes().Count() > Parameter("SchemeNameNumMax", 8) ? ErrorCodes.Parameter : 0;
+            || req.Name.EnumerateRunes().Count() > (int)(Data.Config.PublicParams.Of(_data).SchemeNameNumMax ?? 8) ? ErrorCodes.Parameter : 0;
         if (result == 0)
         {
             var next = session.SkillPlans!.Clone();
@@ -753,13 +768,13 @@ public sealed partial class SkillService
 
     /// <summary>Shared gate for direct skill switches and Build-window child switches.</summary>
     internal int PlanSwitchCooldownError(GameSession session) => InCombat(session) ? ErrorCodes.Parameter
-        : DateTime.UtcNow - session.SkillPlanSwitchUtc < TimeSpan.FromSeconds(Parameter("SchemeCD", 3))
+        : _clock.GetUtcNow().UtcDateTime - session.SkillPlanSwitchUtc < TimeSpan.FromSeconds((int)(Data.Config.PublicParams.Of(_data).SchemeCD ?? 3))
             ? ErrorCodes.Cooldown : 0;
 
     /// <summary>Run skill-change observers after a combined Build transaction releases the character lock.</summary>
     internal async Task OnActivePlanChangedAsync(GameSession session)
     {
-        foreach (var handler in Learned) await handler(session);
+        foreach (var handler in Learned.Handlers) await handler(session);
     }
 
     internal static void CopySkills(RoleProgress from, RoleProgress to)
@@ -830,11 +845,11 @@ public sealed partial class SkillService
             await session.SendGameAsync(PlanUpdate, new SkillGrowthSkillPlanUpdateResp { Result = code });
         }
         // Learned observers may take the same StateLock (cart capacity); run them after the commit and reply.
-        if (learned) foreach (var handler in Learned) await handler(session);
+        if (learned) foreach (var handler in Learned.Handlers) await handler(session);
     }
 
     /// <summary>Skills were learned (quests: 104012 CheckCostJobPoint).</summary>
-    public List<Func<GameSession, Task>> Learned { get; } = [];
+    public AsyncHook<GameSession> Learned { get; } = new("SkillService.Learned");
 
     /// <summary>
     /// GM panel 110 GmCurAllSkillLevUpMax (GMConfig 3007: 1 learns every skill of the current job and stage at its
@@ -1081,7 +1096,7 @@ public sealed partial class SkillService
         int group = req.Info?.SkillId ?? 0;
         int code = req.Plan is < 0 or >= PlanCount || !plans.SkillAssignPlans[req.Plan].IsUnlock
             || req.Plan != plans.CurrentPlanIndex || InCombat(session)
-            || req.QueueIndex < 0 || req.QueueIndex >= Parameter("QueueNum", 12) || op is < 1 or > 3
+            || req.QueueIndex < 0 || req.QueueIndex >= (int)(Data.Config.PublicParams.Of(_data).QueueNum ?? 12) || op is < 1 or > 3
                 ? ErrorCodes.Parameter : 0;
         if (code == 0)
         {

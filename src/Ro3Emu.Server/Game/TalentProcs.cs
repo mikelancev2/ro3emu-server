@@ -310,15 +310,15 @@ public sealed partial class TalentProcs
         _loop = loop;
         buffs.SourceAttributes = BuffAttributes;
         combat.SkillBuffAllowed = SkillBuffAllowed;
-        combat.CastResolved.Add(OnCastResolvedAsync);
-        combat.DealtAsync.Add(RowProcsOnDealtAsync);
-        buffs.Changed.Add(OnBuffsChangedAsync);
+        combat.CastResolved.Subscribe(OnCastResolvedAsync);
+        combat.DealtAsync.Subscribe(RowProcsOnDealtAsync);
+        buffs.Changed.Subscribe(OnBuffsChangedAsync);
         combat.TargetCountRow = TargetCountRow;
-        combat.TakenAsync.Add(OnTakenAsync);
-        combat.Killed.Add(OnKilledAsync);
-        combat.PlayerDied.Add(OnDiedAsync);
-        combat.PlayerKilled.Add(OnPlayerKilledAsync);
-        character.ExtraAttributes.Add(SoulReaperAttributes);
+        combat.TakenAsync.Subscribe(OnTakenAsync);
+        combat.Killed.Subscribe(OnKilledAsync);
+        combat.PlayerDied.Subscribe(OnDiedAsync);
+        combat.PlayerKilled.Subscribe(OnPlayerKilledAsync);
+        character.ExtraAttributes.Subscribe(SoulReaperAttributes);
     }
 
     /// <summary>
@@ -374,7 +374,7 @@ public sealed partial class TalentProcs
     private bool Ready(GameSession s, long buff, long cooldownMs)
     {
         var ready = _readyAt.GetOrCreateValue(s);
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         if (ready.GetValueOrDefault(buff) > now) return false;
         if (cooldownMs > 0) ready[buff] = now + cooldownMs;
         return true;

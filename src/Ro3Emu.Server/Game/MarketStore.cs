@@ -76,8 +76,32 @@ public sealed partial class MarketStore
     /// <summary>Refresh a post-commit projection while its caller holds the market's Realm scope.</summary>
     internal T? ReadCurrent<T>(string kind, string key)
     {
-        var rows = _accounts.ReadSync<MarketRecordSnapshot>(new MarketRecordSnapshotReadPlan(kind, key)).Rows;
+        var rows = ReadCachedSnapshot(kind, key).Rows;
         return rows.Count == 0 ? default : JsonSerializer.Deserialize<T>(rows[0].Data);
+    }
+
+    private readonly object _cacheLock = new();
+    private long _cachedGeneration = -1;
+    private readonly Dictionary<(string Kind, string? Key), MarketRecordSnapshot> _recordCache = [];
+
+    internal MarketRecordSnapshot ReadCachedSnapshot(string kind, string? key = null)
+    {
+        long generation = _accounts.Caches.Current(WrittenCache.Market);
+        lock (_cacheLock)
+        {
+            if (_cachedGeneration != generation) { _recordCache.Clear(); _cachedGeneration = generation; }
+            if (_recordCache.TryGetValue((kind, key), out var hit)) return hit;
+        }
+        var snapshot = _accounts.ReadSync<MarketRecordSnapshot>(new MarketRecordSnapshotReadPlan(kind, key));
+        lock (_cacheLock)
+        {
+            if (_accounts.Caches.Current(WrittenCache.Market) == generation)
+            {
+                if (_cachedGeneration != generation) { _recordCache.Clear(); _cachedGeneration = generation; }
+                _recordCache[(kind, key)] = snapshot;
+            }
+        }
+        return snapshot;
     }
 
     private async Task<int> RunCoreAsync(GameSession? requester, Func<MarketTransaction, int> action,
@@ -104,7 +128,7 @@ public sealed partial class MarketStore
                     .OrderBy(s => s.Role!.Id).ToList();
                 tx = new MarketTransaction(_accounts, _mail, live, _clock.GetUtcNow(),
                     new EscrowEconomyIntent("market/" + command, requester?.Account ?? "", role?.Id ?? 0,
-                        effectiveUtcMs: _clock.GetUtcNow().ToUnixTimeMilliseconds()));
+                        effectiveUtcMs: _clock.GetUtcNow().ToUnixTimeMilliseconds()), this);
                 int code;
                 try
                 {
@@ -157,7 +181,7 @@ public sealed partial class MarketStore
             var notices = new List<Func<Task>>();
             foreach (var p in tx.Participants.Where(p => p.Session != null))
                 foreach (var entry in p.Items.Where(i => p.Before.All(b => b.Guid != i.Guid)).Select(i => i.Entry).Distinct())
-                    foreach (var gained in _character.ItemGained)
+                    foreach (var gained in _character.ItemGained.Handlers)
                     {
                         int count = (int)Math.Clamp(p.Items.Where(i => i.Entry == entry).Sum(i => (long)i.Stack)
                             - p.Before.Where(i => i.Entry == entry).Sum(i => (long)i.Stack), 1, int.MaxValue);
@@ -228,14 +252,15 @@ public sealed class MarketTransaction
     private bool _writes;
     private readonly bool _economicCommand;
     public EscrowEconomyIntent Economy { get; }
+    private readonly MarketStore? _store;
     public IEnumerable<MarketParticipant> Participants => _participants.Values;
     public HashSet<long> MailRecipients { get; } = [];
     public DateTimeOffset Now { get; }
 
     internal MarketTransaction(AccountStore accounts, MailService mail,
-        IReadOnlyList<GameSession> live, DateTimeOffset now, EscrowEconomyIntent? economy = null)
+        IReadOnlyList<GameSession> live, DateTimeOffset now, EscrowEconomyIntent? economy = null, MarketStore? store = null)
     {
-        this._accounts = accounts; this._mail = mail; this._live = live; Now = now; _plan = accounts.NewTransaction();
+        this._accounts = accounts; this._mail = mail; this._live = live; this._store = store; Now = now; _plan = accounts.NewTransaction();
         _economicCommand = economy != null;
         Economy = economy ?? new EscrowEconomyIntent("market/transaction", effectiveUtcMs: now.ToUnixTimeMilliseconds());
     }
@@ -243,8 +268,17 @@ public sealed class MarketTransaction
     /// <summary>Enlist a canonical system template mail in the same escrow transaction.</summary>
     public string DeliverMail(long roleId, int templateId, IEnumerable<InvItem>? items = null,
         IReadOnlyDictionary<int, long>? currency = null, params string[] contentParams)
+        => Deliver(roleId, templateId, items, currency, contentParams, null);
+
+    /// <summary>Same, for a template whose client decodes content_params as its own message (stall sale mail 1029).</summary>
+    public string DeliverMailRaw(long roleId, int templateId, byte[] rawContentParams,
+        IReadOnlyDictionary<int, long>? currency = null)
+        => Deliver(roleId, templateId, null, currency, [], rawContentParams);
+
+    private string Deliver(long roleId, int templateId, IEnumerable<InvItem>? items,
+        IReadOnlyDictionary<int, long>? currency, string[] contentParams, byte[]? rawContentParams)
     {
-        string id = _mail.DeliverMarket(_plan, Now, roleId, templateId, items, currency, contentParams);
+        string id = _mail.DeliverMarket(_plan, Now, roleId, templateId, items, currency, contentParams, rawContentParams);
         _writes = true;
         MailRecipients.Add(roleId);
         return id;
@@ -292,7 +326,9 @@ public sealed class MarketTransaction
         if (_records.TryGetValue((kind, key), out var value)) return value;
         if (!_completeKinds.Contains(kind))
         {
-            var snapshot = _accounts.ReadSync<MarketRecordSnapshot>(new MarketRecordSnapshotReadPlan(kind, key));
+            var snapshot = _store != null
+                ? _store.ReadCachedSnapshot(kind, key)
+                : _accounts.ReadSync<MarketRecordSnapshot>(new MarketRecordSnapshotReadPlan(kind, key));
             var rows = snapshot.Rows;
             _plan.Guard(new MarketRecordGuardPlan(kind, key, snapshot));
             value = rows.Count == 0 ? null : rows[0].Data;
@@ -305,7 +341,9 @@ public sealed class MarketTransaction
     {
         if (_completeKinds.Add(kind))
         {
-            var snapshot = _accounts.ReadSync<MarketRecordSnapshot>(new MarketRecordSnapshotReadPlan(kind));
+            var snapshot = _store != null
+                ? _store.ReadCachedSnapshot(kind)
+                : _accounts.ReadSync<MarketRecordSnapshot>(new MarketRecordSnapshotReadPlan(kind));
             var rows = snapshot.Rows;
             _plan.Guard(new MarketRecordGuardPlan(kind, null, snapshot));
             foreach (var row in rows) _records.TryAdd((kind, row.Id), row.Data);

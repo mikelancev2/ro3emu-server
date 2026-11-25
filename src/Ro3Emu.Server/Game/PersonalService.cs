@@ -21,7 +21,7 @@ namespace Ro3Emu.Server.Game;
 /// unlockInfos is derived each time from the unlock conditions of the tables the editor checks (theme, background,
 /// action). The likes a card received are the role blob "personal_upvote" (PersonalUpvoteList), its popularity the role blob "popularity" (DBPopularityStar).</para>
 /// </summary>
-public sealed class PersonalService
+public sealed partial class PersonalService
 {
     public const uint Sync = 5016, UpdateAppearance = 82553, Upvote = 82554, UpdateCurPlan = 82559, UpdatePlanName = 82560;
     // ErrorCodeConfig 3351-3367, the profile family.
@@ -59,7 +59,7 @@ public sealed class PersonalService
         this._data = data; this._roles = roles; this._functions = functions; this._character = character; this._options = options;
         this._clock = clock;
         // Action 1002 unlocks at base level 50 (PersonalPerformanceConfig, condition 18000001).
-        character.ProgressHandlers.Add(RefreshAsync);
+        character.ProgressHandlers.Subscribe(RefreshAsync);
         character.RegisterItemAction(UnlockDecorationAction, UseDecorationItemAsync);
     }
 
@@ -156,10 +156,11 @@ public sealed class PersonalService
     {
         var plan = new PersonalInfo
         {
-            ThemeId = (int)Param("PersonalDefaultTheme", 1001), BackgroundId = (int)Param("PersonalDefaultBackground", 2001),
-            Mood = (int)Param("PersonalEmoEmpty", 3001),
+            ThemeId = (int)(Data.Config.PublicParams.Of(_data).PersonalDefaultTheme ?? 1001),
+            BackgroundId = (int)(Data.Config.PublicParams.Of(_data).PersonalDefaultBackground ?? 2001),
+            Mood = (int)(double)(Data.Config.PublicParams.Of(_data).PersonalEmoEmpty ?? 3001),
         };
-        foreach (long function in ParamList("PersonalShowcaseDefault"))
+        foreach (long function in (Data.Config.PublicParams.Of(_data).PersonalShowcaseDefault ?? []))
             if (ShowcaseOf(function) is { } showcase && !plan.ShowcaseVisibleList.Contains(showcase)) plan.ShowcaseVisibleList.Add(showcase);
         return plan;
     }
@@ -173,27 +174,14 @@ public sealed class PersonalService
         _ => null,
     };
 
-    private double Param(string key, double fallback) =>
-        _data.Table("PublicParamConfig").TryGetValue(key, out var value) && GameData.Number(value) is { } number ? number : fallback;
-
-    private IEnumerable<long> ParamList(string key) =>
-        _data.Table("PublicParamConfig").TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.Array
-            ? value.EnumerateArray().Select(v => (long)(GameData.Number(v) ?? 0)).Where(v => v > 0) : [];
-
     // ------------------------------------------------------------------ public card
 
     /// <summary>The current preset, for Base (avatar, frame, title) and the "Personal" field of others' view.</summary>
     public static PersonalInfo? Current(DBPersonalInfo? info) =>
         info != null && info.PlanInfos.TryGetValue(info.CurPlanId, out var plan) ? plan : null;
 
-    /// <summary>
-    /// Whether the client can parse the card: LC_DAL_Personal.ParsePersonalInfo walks decalInfos and showcaseVisibleList with
-    /// pairs() unguarded (:724-747), and an empty repeated field decodes as nil. A card without stickers or showcases
-    /// would abort LC_DAL_RolePublic's whole public-card parse (:874-900, before Library, GuildSnap and Team), so it is
-    /// left out of the public data. The own 5016 has no such choice: an unpatched client builds no PersonalPlayerInfo for
-    /// it; Ro3Emu.ClientHooks.PersonalCards reads the missing lists as empty. Kept until that patch is proven in game.
-    /// </summary>
-    public static bool Parseable(PersonalInfo plan) => plan.DecalInfos.Count > 0 && plan.ShowcaseVisibleList.Count > 0;
+    // An untouched role has no stored personal blob. Use the same default preset it sees at login.
+    internal PersonalInfo PublicCard(DBPersonalInfo? info) => Current(info) ?? DefaultPlan();
 
     // ------------------------------------------------------------------ 82553 / 82559 / 82560
 
@@ -250,7 +238,7 @@ public sealed class PersonalService
         int length = new StringInfo(name).LengthInTextElements;
         int result = Gate(s);
         if (result == 0 && !Preset(req.PlanId)) result = ErrPreset;
-        if (result == 0 && (name.Trim().Length == 0 || length > Param("PersonalTemplateLimit", 7))) result = ErrNameLength;
+        if (result == 0 && (name.Trim().Length == 0 || length > (double)(Data.Config.PublicParams.Of(_data).PersonalTemplateLimit ?? 7))) result = ErrNameLength;
         if (result == 0 && Sensitive(name)) result = ErrNameSensitive;
         if (result == 0 && s.Personal!.PlanInfos[req.PlanId].PlanName != name)
         {
@@ -323,7 +311,7 @@ public sealed class PersonalService
     /// re-arms a like. The liked role gets no notice; its card shows the count and Like History (UserDataService).
     /// </summary>
     /// <summary>After a committed like (quest target 106902); listeners post their work.</summary>
-    public List<Action<GameSession>> Upvoted { get; } = [];
+    public SyncHook<GameSession> Upvoted { get; } = new("PersonalService.Upvoted");
 
     public async Task UpvoteAsync(GameSession s, UpvotePersonalReq req)
     {
@@ -335,7 +323,7 @@ public sealed class PersonalService
             || (await _roles.ReadRevisionVectorAsync(target)).Deleted)) result = ErrParameter;
         if (result == 0 && s.Personal!.UpvoteTimes.ContainsKey(target)) result = ErrUpvoted;
         if (result == 0 && s.Personal!.UpvoteTimes.Count > 0
-            && now - s.Personal.UpvoteTimes.Values.Max() < Param("PersonalLikeCD", 1000)) result = ErrUpvoteCooldown;
+            && now - s.Personal.UpvoteTimes.Values.Max() < (double)(Data.Config.PublicParams.Of(_data).PersonalLikeCD ?? 1000)) result = ErrUpvoteCooldown;
         if (result == 0)
         {
             var next = s.Personal!.Clone();
@@ -350,7 +338,7 @@ public sealed class PersonalService
         }
         await s.SendGameAsync(Upvote, new UpvotePersonalResp { Result = result, Req = req });
         if (result == 0) await SyncAsync(s);
-        if (result == 0) foreach (var handler in Upvoted) handler(s);
+        if (result == 0) foreach (var handler in Upvoted.Handlers) handler(s);
     }
 
     /// <summary>The likes a card received (liker id to unix ms), as stored; null when none.</summary>
@@ -409,13 +397,7 @@ public sealed class PersonalService
     }
 
     /// <summary>(inferred) The popularity week starts on Monday 05:00 realm time, as the guild activity week.</summary>
-    public static long WeekStartMs(TimeProvider clock)
-    {
-        var local = clock.GetLocalNow();
-        var day = local.AddHours(-5).Date;
-        int sinceMonday = ((int)day.DayOfWeek + 6) % 7;
-        return new DateTimeOffset(day.AddDays(-sinceMonday).AddHours(5), local.Offset).ToUnixTimeMilliseconds();
-    }
+    public static long WeekStartMs(TimeProvider clock) => GameCalendar.WeekStart(clock).ToUnixTimeMilliseconds();
 
     private int Gate(GameSession s) => s.Personal == null || s.Progress == null ? ErrorCodes.FeatureUnavailable
         : !_functions.IsOpen(s, Function) ? ErrFunction : 0;
@@ -433,17 +415,17 @@ public sealed class PersonalService
         if (info.AvatarFrameId != 0 && _data.Row("PersonalAvatarFrameConfig", info.AvatarFrameId) == null) return ErrConfig;
         // PersonalTitleConfig exports no rows, so no title can be chosen.
         if (info.PersonalTitleId != 0 && _data.Row("PersonalTitleConfig", info.PersonalTitleId) == null) return ErrConfig;
-        if (new StringInfo(info.Sign ?? "").LengthInTextElements > Param("PersonalSignatureLimit", 30)) return ErrSignLength;
+        if (new StringInfo(info.Sign ?? "").LengthInTextElements > (double)(Data.Config.PublicParams.Of(_data).PersonalSignatureLimit ?? 30)) return ErrSignLength;
         if (Sensitive(info.Sign ?? "")) return ErrSignSensitive;
-        if (info.ShowcaseVisibleList.Count > Param("PersonalMaxCabinet", 3)
+        if (info.ShowcaseVisibleList.Count > (double)(Data.Config.PublicParams.Of(_data).PersonalMaxCabinet ?? 3)
             || info.ShowcaseVisibleList.Any(v => v is < ShowcaseCard or > ShowcaseHonor)
             || info.ShowcaseVisibleList.Distinct().Count() != info.ShowcaseVisibleList.Count) return ErrParameter;
-        if (info.RoleInfos.Count > Param("PersonalMaxCharacter", 1)) return ErrParameter;
+        if (info.RoleInfos.Count > (double)(Data.Config.PublicParams.Of(_data).PersonalMaxCharacter ?? 1)) return ErrParameter;
         // The pose list is PerformanceConfig (UI_Sys_Personal_EditRoleAction_ListWidgetCtrl reads m_kCFG_PerformanceConfig),
         // so a pose is one of the role's unlocked emotes (5006 emojiUnlocks); the client preselects one (50001) unasked.
         if (info.RoleInfos.Any(r => r.ActionId != 0 && s.EmojiPlay?.EmojiUnlocks.Contains(r.ActionId) != true
             && !IsUnlocked(s, UnlockAction, r.ActionId))) return ErrLocked;
-        if (info.DecalInfos.Count > Param("PersonalMaxSticker", 20)) return ErrParameter;
+        if (info.DecalInfos.Count > (double)(Data.Config.PublicParams.Of(_data).PersonalMaxSticker ?? 20)) return ErrParameter;
         // Stickers are currencies of item subtype 123 (ItemSubTypePersonalDecal); each placement uses one.
         foreach (var group in info.DecalInfos.GroupBy(d => d.DecalId))
         {

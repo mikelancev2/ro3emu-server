@@ -18,11 +18,12 @@ namespace Ro3Emu.Server.Game;
 /// _iNormalDrop remains additive under its own configured conditions.
 /// No offline reward formula is present in the current schema; 43405 refuses without granting phantom loot.
 /// </summary>
-public sealed class WildAfkService : IGameTicker
+public sealed partial class WildAfkService : IGameTicker
 {
     public const uint Sync = 5035, Info = 43401, Notify = 43402, SaveCharge = 43403, Collection = 43404,
         OfflineReward = 43405, Magnification = 43406, DungeonStart = 43408, Start = 43409, Pause = 43410,
         Snapshot = 43411, SuspendReason = 43412;
+    public const int Function = 18; // FunctionConfig: Bonus Time / OnHook
 
     private readonly GameData _data;
     private readonly RoleStore _roles;
@@ -70,22 +71,20 @@ public sealed class WildAfkService : IGameTicker
         this._sessions = sessions;
         this._world = world;
         this._loop = loop;
-        scene.Leaving.Add(s => SuspendAsync(s));
-        scene.Loaded.Add(s => ReconcileAsync(s));
-        combat.PlayerDied.Add(s => SuspendAsync(s));
+        scene.Leaving.Subscribe(s => SuspendAsync(s));
+        scene.Loaded.Subscribe(s => ReconcileAsync(s));
+        combat.PlayerDied.Subscribe(s => SuspendAsync(s));
         rewards.QualifiesForBonus = BeforeKillAsync;
+        rewards.IsFieldAutoBattle = IsFieldAutoBattle;
         rewards.StageAfkKill = StageAfkKill;
-        rewards.KillDropsGranted.Add(DropsGrantedAsync);
+        rewards.KillDropsGranted.Subscribe(DropsGrantedAsync);
         daily.BeforeReset = BeforeDailyResetAsync;
         daily.PlanAfkRollover = PlanDailyRollover;
     }
-
-    private long Param(string key, long fallback) => _data.Table("PublicParamConfig").TryGetValue(key, out var value)
-        ? (long)(GameData.Number(value) ?? fallback) : fallback;
-    private long DailySeconds => Param("OnHookDailyFightTime", 60) * 60;
-    private long CapSeconds => Param("OnHookFightTimeLimit", 180) * 60;
-    private long MonitorMs => Param("OnHookConditionMonito", 10) * 1000;
-    private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private long DailySeconds => (Data.Config.PublicParams.Of(_data).OnHookDailyFightTime ?? 60) * 60;
+    private long CapSeconds => (Data.Config.PublicParams.Of(_data).OnHookFightTimeLimit ?? 180) * 60;
+    private long MonitorMs => (Data.Config.PublicParams.Of(_data).OnHookConditionMonito ?? 10) * 1000;
+    private long Now => _loop.NowMs;
     // A queued operation may acquire the old role's gate after logout or a role switch replaced this state.
     private static bool Owns(GameSession s, State state) => s.Role != null && ReferenceEquals(s.WildAfk, state);
     private async Task<LegacyOwnerScope?> EnterStateScopeAsync(GameSession s, State state, string origin)
@@ -99,7 +98,7 @@ public sealed class WildAfkService : IGameTicker
         catch { scope.Dispose(); throw; }
         return scope;
     }
-    private bool Unlocked(GameSession s) => s.Progress != null && _functions.IsOpen(s, 18);
+    private bool Unlocked(GameSession s) => s.Progress != null && _functions.IsOpen(s, Function);
     /// <summary>
     /// The maps the OnHook panel recommends monsters on (OnHookMonsterRecommendConfig._iMapID). Pharos Lighthouse (10537) has _iSceneType 0 like the towns, yet the
     /// panel recommends six of its monsters, so it is a hunting field for Bonus Time (inferred). Every other listed map is a field (1) or a cave (6).
@@ -119,6 +118,11 @@ public sealed class WildAfkService : IGameTicker
     /// <summary>Where 43409 may turn it back on: those and the towns (scene type 0). Localization_en 10960000077 refuses only "Dungeons and similar Locations", and the
     /// switch already stays on, suspended, when a player walks from a field into town, so refusing a town left a stopped switch off (inferred). It runs only on a <see cref="Field"/>.</summary>
     private bool Startable(GameSession s) => Field(s) || s.InstanceId == 0 && _data.Row("MapConfig", s.SceneEntry) is { } map && GameData.Int(map, "_iSceneType") == 0;
+    // Shared by exploration note drops and the Valhalla statue. Bonus Time selects the loot table independently.
+    internal bool IsFieldAutoBattle(GameSession s, MonsterUnit monster) =>
+        s.WildAfk != null && s.AutoBattle && !s.Dead && !s.SceneLoading && s.WorldScene == monster.WorldScene
+        && Unlocked(s) && Field(s) && Ordinary(monster);
+
     private bool Ordinary(MonsterUnit monster) => _data.Row("NPCConfig", monster.Template.NpcId) is { } npc
         && GameData.Int(npc, "_iWildMonsters") == 1 && GameData.Int(npc, "_iNPCSubType") is 1 or 2;
     // Only the player's own map: this runs every second per auto-battling player.
@@ -129,7 +133,7 @@ public sealed class WildAfkService : IGameTicker
     private long Epoch(long nowMs)
     {
         var local = DateTimeOffset.FromUnixTimeMilliseconds(nowMs).LocalDateTime;
-        var day = local.AddHours(-Param("OnHookDailyRefreshTime", 5)).Date.AddHours(Param("OnHookDailyRefreshTime", 5));
+        var day = local.AddHours(-(Data.Config.PublicParams.Of(_data).OnHookDailyRefreshTime ?? 5)).Date.AddHours((Data.Config.PublicParams.Of(_data).OnHookDailyRefreshTime ?? 5));
         return new DateTimeOffset(day).ToUnixTimeSeconds();
     }
 
@@ -211,7 +215,7 @@ public sealed class WildAfkService : IGameTicker
         state.Info.IsSuspended = true;
         state.DailyEpoch = epoch;
         // Cumulative snapshots must not go backwards when old dated records are pruned (IncomeWidget subtracts them).
-        int keep = (int)Math.Max(1, Param("OnHookRecordLimit", 8));
+        int keep = (int)Math.Max(1, (Data.Config.PublicParams.Of(_data).OnHookRecordLimit ?? 8));
         foreach (long key in state.Info.DailyDropRecords.Keys.OrderDescending().Skip(keep).ToArray()) state.Info.DailyDropRecords.Remove(key);
         return true;
     }
@@ -483,7 +487,7 @@ public sealed class WildAfkService : IGameTicker
                 : enabled && !Startable(s) ? ErrorCodes.AfkDungeon
                 : enabled && info.HighMultiplierTimeSeconds <= 0 ? ErrorCodes.AfkTimeEmpty
                 : enabled == info.IsHighMagnification ? (enabled ? ErrorCodes.AfkAlreadyActive : ErrorCodes.AfkNotActive)
-                : now - state.LastToggleMs < Param("OnHookPauseButtonCD", 1) * 1000 ? ErrorCodes.AfkToggleCooldown : 0;
+                : now - state.LastToggleMs < (Data.Config.PublicParams.Of(_data).OnHookPauseButtonCD ?? 1) * 1000 ? ErrorCodes.AfkToggleCooldown : 0;
             if (error == 0)
             {
                 state.LastToggleMs = now;
@@ -523,7 +527,7 @@ public sealed class WildAfkService : IGameTicker
                 : _data.Row("NPCConfig", req.MonsterId) is not { } npc || GameData.Int(npc, "_iWildMonsters") != 1 ? ErrorCodes.AfkCollectionInvalid
                 : req.IsAdd && exists ? ErrorCodes.AfkCollectionExists
                 : !req.IsAdd && !exists ? ErrorCodes.AfkCollectionMissing
-                : req.IsAdd && list.Count >= Param("OnHookMonsterNum", 7) ? ErrorCodes.AfkCollectionFull : 0;
+                : req.IsAdd && list.Count >= (Data.Config.PublicParams.Of(_data).OnHookMonsterNum ?? 7) ? ErrorCodes.AfkCollectionFull : 0;
             if (error == 0)
             {
                 if (req.IsAdd) list.Add(req.MonsterId); else list.Remove(req.MonsterId);
@@ -551,7 +555,7 @@ public sealed class WildAfkService : IGameTicker
             var info = state.Info;
             long now = Now / 1000;
             int error = !Unlocked(s) ? ErrorCodes.FeatureUnavailable
-                : info.CurrentSnapshot is { Timestamp: > 0 } snap && now - snap.Timestamp < Param("OnHookAwardSnapshotCD", 5)
+                : info.CurrentSnapshot is { Timestamp: > 0 } snap && now - snap.Timestamp < (Data.Config.PublicParams.Of(_data).OnHookAwardSnapshotCD ?? 5)
                     ? ErrorCodes.Cooldown : 0;
             if (error == 0)
             {
@@ -608,7 +612,7 @@ public sealed class WildAfkService : IGameTicker
         if (!next.Info.DailyDropRecords.TryGetValue(day, out var record))
             next.Info.DailyDropRecords[day] = record = new DailyAFKDropRecord();
         foreach (long key in next.Info.DailyDropRecords.Keys.OrderDescending()
-            .Skip((int)Math.Max(1, Param("OnHookRecordLimit", 8))).ToArray())
+            .Skip((int)Math.Max(1, (Data.Config.PublicParams.Of(_data).OnHookRecordLimit ?? 8))).ToArray())
             next.Info.DailyDropRecords.Remove(key);
         record.MonsterKillCount[monster.Template.NpcId] = record.MonsterKillCount.GetValueOrDefault(monster.Template.NpcId) + 1;
         next.Info.CurrentSnapshot ??= new AFKDropSnapshot { Timestamp = at / 1000 };
@@ -678,7 +682,7 @@ public sealed class WildAfkService : IGameTicker
             info.TodayKillCount++;
             long day = state.DailyEpoch;
             if (!info.DailyDropRecords.TryGetValue(day, out var record)) info.DailyDropRecords[day] = record = new DailyAFKDropRecord();
-            foreach (long key in info.DailyDropRecords.Keys.OrderDescending().Skip((int)Math.Max(1, Param("OnHookRecordLimit", 8))).ToArray())
+            foreach (long key in info.DailyDropRecords.Keys.OrderDescending().Skip((int)Math.Max(1, (Data.Config.PublicParams.Of(_data).OnHookRecordLimit ?? 8))).ToArray())
                 info.DailyDropRecords.Remove(key);
             record.MonsterKillCount[monster.Template.NpcId] = record.MonsterKillCount.GetValueOrDefault(monster.Template.NpcId) + 1;
             // Snapshot baseline is created before the first drop. Current totals grow; 43411 captures the next baseline.

@@ -235,7 +235,7 @@ public sealed partial class FriendExtraService(FriendStore friends, RoleStore ro
         var record = new FriendGiftRecord
         {
             Sender = self, Receiver = req.RoleId, ItemId = req.ItemId, Count = req.Count, Message = req.Message,
-            IsAnonymous = req.IsAnonymous, SendTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Intimacy = intimacy,
+            IsAnonymous = req.IsAnonymous, SendTime = loop.NowSec, Intimacy = intimacy,
         };
         (record.Popularity, record.Affection) = personal.GiftValues(req.ItemId, req.Count);
         sender.SendGiftRecords.Add(record);
@@ -247,13 +247,17 @@ public sealed partial class FriendExtraService(FriendStore friends, RoleStore ro
         string operationId = Guid.NewGuid().ToString("N");
         var envelope = new EconomyEnvelope(operationId, s.Account!, self, "friend-gift",
             Convert.ToHexString(SHA256.HashData(req.ToByteArray())), "friend-gift:" + operationId,
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            loop.NowMs,
             [new EconomyEffect(new EconomyAsset(EconomyAssetKind.Item, item),
                 new EconomyOwner(EconomyOwnerKind.Role, self.ToString(CultureInfo.InvariantCulture)),
                 EconomyCompartment.Inventory, -req.Count, EconomyLegKind.Sink, EconomyReason.FriendGiftCost)],
             record.ToByteArray());
         using var characterLock = await CharacterService.Lock(s, owners.Current);
-        var paid = await character.ExchangeLockedAsync(s, [(item, (long)req.Count)], [], popup: false, persist: tx =>
+        var paid = await character.ExchangeLockedAsync(s, new ExchangeRequest
+        {
+            Cost = [(item, (long)req.Count)],
+            Popup = false,
+            Persist = tx =>
         {
             tx.ExpectRole(recipientVector);
             tx.FriendMetadata(self, senderBlob);
@@ -261,7 +265,9 @@ public sealed partial class FriendExtraService(FriendStore friends, RoleStore ro
             tx.FriendIntimacy(self, receiverId, intimacy);
             tx.FriendIntimacy(receiverId, self, intimacy);
             tx.WithEconomy(envelope);
-        }, asyncCommit: true);
+        },
+            AsyncCommit = true,
+        });
         if (paid == null) { await s.SendGameAsync(GiveGift, new GiveFriendGiftResp { Result = ErrorCodes.ItemsShort }); return; }
         committed(intimacy);
         // (inferred) Popularity is no asset: credited in its own commit once the gift is paid.

@@ -36,6 +36,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         this._data = data;
         this._loop = loop;
         this._log = log;
+        _tickNowMs = loop.NowMs;
         world.UnitRemoved.Add(unit =>
         {
             if (unit is MonsterUnit monster && _spawns.TryGetValue(monster.RuntimeMap, out var owner))
@@ -85,7 +86,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     public Func<MonsterUnit, GameSession, Task>? Attack { get; set; }
     public Func<MonsterUnit, TowerPetUnit, Task>? AttackPet { get; set; }
 
-    public static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private long NowMs => _loop.NowMs;
 
     public MonsterTemplate? Template(int npcId)
     {
@@ -190,7 +191,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     private float DamageRadiusOf(JsonElement npc)
     {
         var config = new Data.Config.NPCConfig(npc);
-        long min = _data.Table("PublicParamConfig").TryGetValue("MinCollisionCircleRadius", out var v) ? (long)(GameData.Number(v) ?? 110) : 110;
+        long min = Data.Config.PublicParams.Of(_data).MinCollisionCircleRadius ?? 110;
         return Data.Config.UnitConfig.Get(_data, config.UnitId)?.DamageRadius(config, min) ?? 0;
     }
 
@@ -288,7 +289,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         await _world.AddUnitAsync(monster);
         if (!state.Retired)
         {
-            foreach (var handler in Born) await handler(monster);
+            foreach (var handler in Born.Handlers) await handler(monster);
             return true;
         }
         if (state.Units.Remove(monster)) await _world.RemoveUnitAsync(monster);
@@ -308,8 +309,12 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         state.Deadlines.Add((_loop.Now + delay, work));
 
     /// <summary>Owned deadlines can be dropped immediately when a runtime retires.</summary>
+    // MonsterService.Tick(GameTime) stamps it once per loop tick for the dormant path of the map ticks.
+    private long _tickNowMs;
+
     public void Tick(GameTime time)
     {
+        _tickNowMs = NowMs;
         // The capture of each state lives in RunDue: a lambda over the loop variable here allocated a closure for
         // every spawn state on every tick, due or not.
         List<SpawnState>? ready = null;
@@ -352,7 +357,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     }
 
     /// <summary>After a monster joined its map, from a spawn group or alone (MvpService: NPCConfig _kBornEventBuff).</summary>
-    public List<Func<MonsterUnit, Task>> Born { get; } = [];
+    public AsyncHook<MonsterUnit> Born { get; } = new("MonsterService.Born");
 
     /// <summary>
     /// A monster outside the map's spawn groups (field MVPs): no group respawn, the caller decides when it comes back.
@@ -398,7 +403,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
             await _world.AddUnitAsync(monster);
             if (state is not { Retired: true })
             {
-                foreach (var handler in Born) await handler(monster);
+                foreach (var handler in Born.Handlers) await handler(monster);
                 return monster;
             }
             if (state.Units.Remove(monster)) await _world.RemoveUnitAsync(monster);
@@ -422,7 +427,8 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         float best = float.MaxValue;
         foreach (var p in m.Viewers)
         {
-            if (p.Role == null || p.Dead || TargetVisible?.Invoke(m, p) == false || Spares?.Invoke(m, p) == true) continue;
+            if (p.Role == null || p.Dead || TargetVisible?.Invoke(m, p) == false || Spares?.Invoke(m, p) == true
+                || m.Ignores?.Invoke(p) == true) continue;
             float d = Distance(m, p);
             if (d <= m.Template.ViewRange && d < best) { best = d; near = p; }
         }
@@ -440,7 +446,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     /// <summary>A guardian control that forbids walking stops a moving monster where it is.</summary>
     private void StopWhenRooted(MonsterUnit m, long now)
     {
-        if (Forbidden?.Invoke(m, ForbiddenState.Walk) != true || !m.Moving) return;
+        if (!m.Moving || Forbidden?.Invoke(m, ForbiddenState.Walk) != true) return;
         m.Advance(now);
         m.Moving = false;
         SendStop(m, now);
@@ -448,6 +454,13 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
 
     public void Tick(MonsterUnit m, MapInstance map)
     {
+        if (m.Viewers.Count == 0 && Dormant(m))
+        {
+            // Nothing below acts for it: only the roam clock runs, as it would (see the end of this method). It reads
+            // the loop tick's time: a clock read per monster was half the cost of a map nobody is on.
+            if (_tickNowMs >= m.NextRoamMs && !m.Dead && m.Hp > 0 && m.Template.RoamDistance > 0) ScheduleRoam(m, _tickNowMs);
+            return;
+        }
         if (m.RuntimeMap.Kind == RuntimeMapKind.PublicLine
             && (!_spawns.TryGetValue(m.RuntimeMap, out var state) || state.Retired)) return;
         if (m.Dead || m.Hp <= 0) return; // lethal HP is authoritative before the awaited death broadcast finishes
@@ -489,7 +502,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
             return;
         }
         if (_companionTargets.Count > 0 && FightsCompanion(m, map, now)) return; // MonsterService.Companions
-        if (m.Viewers.Count > 0 && !m.Returning && AttacksOnSight(m))
+        if (m.Viewers.Count > 0 && !m.Returning && LooksAround(m) && AttacksOnSight(m))
         {
             var near = NearestTarget(m);
             if (near != null)
@@ -513,11 +526,30 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
             }
         }
         // Roam only where somebody can see it.
-        if (!m.Moving && m.Template.RoamDistance > 0 && now >= m.NextRoamMs)
-        {
-            m.NextRoamMs = now + m.Template.RoamTimeMs + _random.Next(-m.Template.RoamTimeMs / 4, m.Template.RoamTimeMs / 4);
-            if (m.Viewers.Count > 0) Roam(m, map);
-        }
+        if (!m.Moving && m.Template.RoamDistance > 0 && ScheduleRoam(m, now) && m.Viewers.Count > 0) Roam(m, map);
+    }
+
+    /// <summary>A monster no player shows that has nothing in progress: no walk, fight, march, return, timed slow or
+    /// companion. Its tick changes nothing but the roam clock, so the map skips the rest (a field map holds ~1500
+    /// monsters and keeps ticking after its players leave).</summary>
+    public bool Dormant(MonsterUnit monster) => monster.Dead || monster.Hp <= 0
+        || !monster.Moving && monster.Target == null && monster.PetTarget == null && monster.March == null
+            && !monster.Returning && monster.SlowMovementExpireMs == 0
+            && (_companionTargets.Count == 0 || !_companionTargets.ContainsKey(monster));
+
+    /// <summary>Ticks between two looks of an aggressive monster for a player in sight (inferred: the client gives no AI
+    /// think rate). The look reads every player that shows the monster, so on a crowded line it was the map tick's main
+    /// cost; staggered by uid, a quarter of the monsters look on each tick and a player is noticed within 200 ms.</summary>
+    private const int LookEveryTicks = 4;
+
+    private bool LooksAround(MonsterUnit m) => (_tickNowMs / 50 + m.Uid) % LookEveryTicks == 0;
+
+    /// <summary>Moves the roam clock on when it is due; true when the monster may roam now.</summary>
+    private bool ScheduleRoam(MonsterUnit m, long now)
+    {
+        if (now < m.NextRoamMs) return false;
+        m.NextRoamMs = now + m.Template.RoamTimeMs + _random.Next(-m.Template.RoamTimeMs / 4, m.Template.RoamTimeMs / 4);
+        return true;
     }
 
     /// <summary>Totem Icebound Protection: apply a timed movement reduction to one attacking monster.</summary>
@@ -597,7 +629,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     }
 
     /// <summary>Authoritative target transitions, consumed by hatred/lock notifications and facing effects.</summary>
-    public List<Func<MonsterUnit, GameSession?, GameSession?, Task>> TargetChanged { get; } = [];
+    public AsyncHook<MonsterUnit, GameSession?, GameSession?> TargetChanged { get; } = new("MonsterService.TargetChanged");
 
     private void SetTarget(MonsterUnit monster, GameSession? target)
     {
@@ -606,7 +638,7 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         monster.Target = target;
         if (previous == null && target != null) LeaveRoute(monster); // MonsterService.March
         ReleaseSurroundSlot(monster);
-        foreach (var handler in TargetChanged) _loop.TrackRuntimeDetached("monster target change", () => handler(monster, previous, target));
+        foreach (var handler in TargetChanged.Handlers) _loop.TrackRuntimeDetached("monster target change", () => handler(monster, previous, target));
     }
 
     /// <summary>A tower pet's attack can draw aggro without losing the player fallback (inferred).</summary>

@@ -33,9 +33,6 @@ public sealed partial class PetService
         if (s.IncubateInfo.Count == 0) state.IncubationSlot.Remove(slot);
     }
 
-    private long PetParam(string name, long fallback) => _data.Table("PublicParamConfig").TryGetValue(name, out var v)
-        ? (long)(GameData.Number(v) ?? fallback) : fallback;
-
     /// <summary>
     /// A round takes new eggs (<paramref name="place"/>) only while the client offers it: LC_PetHelper.GetActivePoolTypeInfo
     /// shows, per _iSlotType, a round whose PetIncubationSlotConfig._iActivity is open (LC_ActivityHelper.IsActivityOpen),
@@ -77,7 +74,7 @@ public sealed partial class PetService
             else
             {
                 await ChangedAsync(s, items: cost.Count > 0);
-                if (cost.Count == 0) foreach (var handler in _character.StateChanged) handler(s); // 306004
+                if (cost.Count == 0) foreach (var handler in _character.StateChanged.Handlers) handler(s); // 306004
             }
         }
         await s.SendGameAsync(RoomLevelUp, new PetIncubationLvUpRes { Result = code });
@@ -104,7 +101,7 @@ public sealed partial class PetService
         bool levelled = false;
         while (RoomStep(s.Pets!) is { } step && await ExchangeAsync(s, "room-level", step.Next, step.Cost)) levelled = true;
         // A new room level: quest targets read it (growth-manual 306004).
-        if (levelled) foreach (var handler in _character.StateChanged) handler(s);
+        if (levelled) foreach (var handler in _character.StateChanged.Handlers) handler(s);
         return levelled;
     }
 
@@ -297,7 +294,7 @@ public sealed partial class PetService
     {
         using var held = await CharacterService.Lock(s);
         int code = RoundGate(s, req.RoundId, place: true);
-        if (code == 0 && s.Pets!.IncubationLv < PetParam("UnlockFastIncubationLv", 2))
+        if (code == 0 && s.Pets!.IncubationLv < (Data.Config.PublicParams.Of(_data).UnlockFastIncubationLv ?? 2))
             code = ErrorCodes.PetOperation;
         var config = code == 0 ? _data.Row("PetIncubationSlotConfig", req.RoundId) : null;
         var next = s.Pets?.Clone();
@@ -324,12 +321,12 @@ public sealed partial class PetService
                     seconds = Math.Max(0, GameData.Int(Room(next)!.Value, "_iIncubateTime"));
                 }
                 else seconds = Remaining(next, egg);
-                long interval = PetParam("PetIncubationAccelerate", 300);
+                long interval = (Data.Config.PublicParams.Of(_data).PetIncubationAccelerate ?? 300);
                 if (interval <= 0) { code = ErrorCodes.PetNoConfig; break; }
                 long need = (seconds + interval - 1) / interval;
                 if (need > 0)
                 {
-                    int item = checked((int)PetParam("PetIncubationAccelerateItemId", 1250724));
+                    int item = checked((int)(Data.Config.PublicParams.Of(_data).PetIncubationAccelerateItemId ?? 1250724));
                     costs[item] = checked(costs.GetValueOrDefault(item) + need);
                 }
                 selected++;
@@ -384,7 +381,7 @@ public sealed partial class PetService
     /// The eggs it drew are synced as placed first and the final 5017 removes them, the slot changes the client already
     /// sees for 33318 then 33319 (inferred: what the original server sent for 33325 is unknown).
     /// </summary>
-    private async Task SyncPlacedAsync(GameSession s, long round, List<(long Slot, DBIncubateInfo Egg)> drawn)
+    private static async Task SyncPlacedAsync(GameSession s, long round, List<(long Slot, DBIncubateInfo Egg)> drawn)
     {
         if (drawn.Count == 0) return;
         var placed = s.Pets!.Clone();

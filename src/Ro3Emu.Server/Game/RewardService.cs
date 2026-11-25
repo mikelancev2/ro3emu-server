@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Google.Protobuf;
 using Romsg;
 using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data;
@@ -17,6 +18,10 @@ namespace Ro3Emu.Server.Game;
 /// </summary>
 public sealed class RewardService
 {
+    internal ExplorationNoteDrops? ExplorationNotes { get; set; }
+    internal Func<GameSession, MonsterUnit, bool>? IsFieldAutoBattle { get; set; }
+    internal Func<GameSession, Task>? SyncExplorationRestriction { get; set; }
+
     private const int BaseExpItem = 100, JobExpItem = 101;
     private const int RewardDrop = 8; // ManifestType Drop
 
@@ -26,42 +31,52 @@ public sealed class RewardService
     private readonly ILogger<RewardService> _log;
     private Random _random = new();
     private Dictionary<int, long>? _expCorrection;
+    private readonly Dictionary<long, long> _statueFieldExp;
     private readonly DropAttenuation _attenuation;
     private readonly FieldExpRule[] _configuredFieldExp; // Ro3Emu:FieldExpRates (inferred), empty unless an operator set it
     private volatile FieldExpRule[] _fieldExp; // the rules in force: the configured ones until a GM changes them
     private readonly double _expRate; // Ro3Emu:ExpRate (inferred), 1.0 unless an operator set it
+    private readonly GameLoop? _loop;
+    private readonly PartyExpShareOptions? _partyShare; // Ro3Emu:PartyExpShare (inferred), null unless an operator enabled it
 
     /// <summary>Field AFK selects the enhanced _iDrop table only for qualified ordinary field kills.
     /// Other kills use environment 0, preserving ordinary rewards (localization 10960000077; mapping inferred).</summary>
     public Func<GameSession, MonsterUnit, Task<bool>>? QualifiesForBonus { get; set; }
     /// <summary>Actual committed kill drops, after EXP correction; excludes GM, quest and other item grants.</summary>
-    public List<Func<GameSession, MonsterUnit, IReadOnlyList<(int Entry, long Count)>, Task>> KillDropsGranted { get; } = [];
+    public AsyncHook<GameSession, MonsterUnit, IReadOnlyList<(int Entry, long Count)>> KillDropsGranted { get; } = new("RewardService.KillDropsGranted");
     internal Action<GameSession, MonsterUnit, RewardSettlement, IReadOnlyList<(int Entry, int Count)>, long, long>? StageAfkKill { get; set; }
     /// <summary>Monster Hunt: the area drop rolled with an ordinary field kill (MonsterHuntService).</summary>
-    internal List<Func<GameSession, MonsterUnit, IEnumerable<(int Entry, int Count)>>> ExtraKillDrops { get; } = [];
+    internal OrderedHook<Func<GameSession, MonsterUnit, IEnumerable<(int Entry, int Count)>>> ExtraKillDrops { get; } = new("RewardService.ExtraKillDrops");
     /// <summary>Monster Hunt: its kill counters join the kill's own transaction, after the AFK child (MonsterHuntService).</summary>
     internal Action<GameSession, MonsterUnit, RewardSettlement>? StageHuntKill { get; set; }
 
     public RewardService(CombatService combat, CharacterService character, TeamService teams, GameData data, ILogger<RewardService> log,
-        Microsoft.Extensions.Options.IOptions<ServerOptions>? options = null)
+        GameLoop? loop = null, Microsoft.Extensions.Options.IOptions<ServerOptions>? options = null)
     {
         _fieldExp = _configuredFieldExp = FieldExpRates.Valid(options?.Value);
         _expRate = Rate(options?.Value.ExpRate);
+        _statueFieldExp = ValhallaService.FieldExpBonuses(data);
+        _loop = loop;
+        _partyShare = options?.Value.PartyExpShare is { Enabled: true } share ? share : null;
         this._character = character;
         this._teams = teams;
         this._data = data;
         this._log = log;
         _attenuation = new DropAttenuation(data);
-        combat.BeforeKilled.Add(PrepareKilledAsync);
-        combat.Killed.Add(KilledAsync);
+        combat.BeforeKilled.Subscribe(PrepareKilledAsync);
+        combat.Killed.Subscribe(KilledAsync);
     }
 
     private sealed class KillOutcome
     {
         internal required Role Role;
         internal required List<(int Entry, int Count)> Items;
+        internal ExplorationNoteDrops.Roll? Note;
+        internal bool NoteGranted;
         internal long BaseExp;
         internal long JobExp;
+        internal List<(GameSession Member, long Exp)> Shares = [];
+        internal bool SharesPosted;
         internal bool Published;
         /// <summary>The bag items the committed kill created (auto-decomposed ones are gone).</summary>
         internal List<InvItem> Granted = [];
@@ -104,21 +119,52 @@ public sealed class RewardService
             if (_outcomes.TryGetValue(monster, out var stale) && stale.Role.Id != role.Id) _outcomes.Remove(monster);
             if (!_outcomes.TryGetValue(monster, out var outcome))
             {
-                var (items, baseExp, jobExp) = ResolveKill(player, monster, bonus);
+                bool fieldAutoBattle = IsFieldAutoBattle?.Invoke(player, monster) == true;
+                var (drops, baseExp, jobExp) = ResolveKill(player, monster, bonus, fieldAutoBattle);
                 // An advanced pass raises a currency's drops (PassPrivileges.CopperEffAdd).
-                items = PassPrivileges.BoostDrops(_data, player, items);
-                outcome = new KillOutcome { Role = role, Items = items, BaseExp = baseExp, JobExp = jobExp };
+                drops = PassPrivileges.BoostDrops(_data, player, drops);
+                outcome = new KillOutcome { Role = role, Items = drops, BaseExp = baseExp, JobExp = jobExp };
+                ShareWithParty(player, outcome);
+                if (fieldAutoBattle) outcome.Note = ExplorationNotes?.Choose(player);
                 _outcomes.Add(monster, outcome);
             }
             _character.StageKillTaskObligations?.Invoke(player, monster, settlement);
             // A retry re-stages: the later stage is undone first, so the AFK reset never restores a stale wrapper.
             settlement.ResetHuntStage?.Invoke();
-            StageAfkKill?.Invoke(player, monster, settlement, outcome.Items, outcome.BaseExp, outcome.JobExp);
+            var items = outcome.Items;
+            DBRestrictInfo? restrict = null;
+            if (outcome.Note is { } note && ExplorationNotes?.Spend(player, note) is { } remaining)
+            {
+                items = [.. items, (note.Item, 1)];
+                restrict = player.Restrictions!.Clone();
+                restrict.RestrictCount[remaining.Id] = remaining;
+            }
+            StageAfkKill?.Invoke(player, monster, settlement, items, outcome.BaseExp, outcome.JobExp);
             StageHuntKill?.Invoke(player, monster, settlement);
             settlement.LibraryMonster = monster.Template.NpcId;
-            outcome.Granted = await _character.ExchangeLockedAsync(player, [], outcome.Items, popup: false,
-                sync: outcome.Items.Count > 0, baseExp: outcome.BaseExp, jobExp: outcome.JobExp, rewardSettlement: settlement,
-                persist: settlement.Enlist, committed: settlement.Applied) ?? [];
+            outcome.Granted = await _character.ExchangeLockedAsync(player, new ExchangeRequest
+            {
+                Goods = items,
+                Popup = false,
+                Sync = items.Count > 0,
+                BaseExp = outcome.BaseExp,
+                JobExp = outcome.JobExp,
+                RewardSettlement = settlement,
+                Persist = tx =>
+                {
+                    settlement.Enlist?.Invoke(tx);
+                    if (restrict != null) tx.RoleBlob(role.Id, "life_restrict", restrict.ToByteArray());
+                },
+                Committed = () =>
+                {
+                    settlement.Applied?.Invoke();
+                    if (restrict == null) return;
+                    player.Restrictions = restrict;
+                    outcome.NoteGranted = true;
+                    outcome.Items = items;
+                },
+            }) ?? [];
+            if (settlement.Committed) PostShares(outcome);
         }
         catch
         {
@@ -146,7 +192,7 @@ public sealed class RewardService
         }
     }
 
-    internal (List<(int Entry, int Count)> Items, long BaseExp, long JobExp) ResolveKill(GameSession player, MonsterUnit monster, bool bonus)
+    internal (List<(int Entry, int Count)> Items, long BaseExp, long JobExp) ResolveKill(GameSession player, MonsterUnit monster, bool bonus, bool fieldAutoBattle = false)
     {
         if (ResolveKillForTest != null) return ResolveKillForTest(player, monster);
         // Team-boss personal awards have their own durable dungeon obligation; ordinary loot stays empty.
@@ -154,10 +200,11 @@ public sealed class RewardService
             return ([], 0, 0);
         if (_data.Row("NPCConfig", monster.Template.NpcId) is not { } npc) return ([], 0, 0);
         var drops = new List<(int Entry, int Count)>();
+        int partyRate = _teams.DropBonus(player);
         foreach (var (row, maps) in KillDropRows(_data, npc, bonus))
-            if (maps.Count == 0 || maps.Contains(player.SceneEntry)) RollPools(row, player, drops, monster.Template.Level);
+            if (maps.Count == 0 || maps.Contains(player.SceneEntry)) RollPools(row, player, drops, monster.Template.Level, partyRate);
 
-        foreach (var extra in ExtraKillDrops) drops.AddRange(extra(player, monster));
+        foreach (var extra in ExtraKillDrops.Handlers) drops.AddRange(extra(player, monster));
         long baseExp = drops.Where(d => d.Entry == BaseExpItem).Sum(d => (long)d.Count);
         var items = drops.Where(d => d.Entry is not (BaseExpItem or JobExpItem) && _data.Row("ItemConfig", d.Entry) != null).ToList();
         if (baseExp > 0)
@@ -166,11 +213,49 @@ public sealed class RewardService
             baseExp = baseExp * Correction((int)Math.Clamp(gap, -200, 200)) / 10000;
             baseExp = Math.Max(1, baseExp * _teams.ExpBonus(player) / 10000);
             baseExp = ScaleFieldExp(monster.Template.NpcId, player.Progress!.Level, baseExp);
+            if (fieldAutoBattle && player.OdinStatue is { CurLv: > 0 } statue)
+                baseExp += baseExp * _statueFieldExp.GetValueOrDefault(statue.CurLv) / 10000;
             baseExp = Math.Max(1, (long)Math.Round(baseExp * _expRate));
         }
         // BaseExpAddConfig catch-up below the server level (CharacterService.LevelRules).
         baseExp = _character.WithPursueBonus(player.Progress!.Level, baseExp);
         return (items, baseExp, _character.JobExpFromBase(baseExp));
+    }
+
+    /// <summary>
+    /// PartyExpShare (inferred, an operator option): a kill's Base EXP as the killer earned it, shared with the party members
+    /// alive on the same map line. Split divides it evenly between the killer and them (the killer's Job EXP follows its
+    /// part), Full gives each member all of it. The members' parts are granted after the kill commits
+    /// (<see cref="PostShares"/>) as each member's own EXP grant (CharacterService.AddExpAsync: its Job EXP and catch-up).
+    /// </summary>
+    private void ShareWithParty(GameSession player, KillOutcome outcome)
+    {
+        if (_partyShare is not { } share || _loop == null || outcome.BaseExp <= 0) return;
+        var members = _teams.SameMapMembers(player);
+        if (members.Count == 0) return;
+        long part = outcome.BaseExp;
+        if (share.Mode == PartyExpShareMode.Split)
+        {
+            part = Math.Max(1, outcome.BaseExp / (members.Count + 1));
+            outcome.BaseExp = part;
+            outcome.JobExp = _character.JobExpFromBase(part);
+        }
+        outcome.Shares = [.. members.Select(m => (m, part))];
+    }
+
+    /// <summary>Each member's part as that role's own EXP grant, once, after the killer's reward committed. A part lost to a
+    /// crash in between is not granted again (inferred: an operator option, not a durable obligation of the kill).</summary>
+    private void PostShares(KillOutcome outcome)
+    {
+        if (outcome.SharesPosted || _loop == null) return;
+        outcome.SharesPosted = true;
+        foreach (var (member, exp) in outcome.Shares)
+        {
+            var role = member.Role;
+            bool Current() => role != null && ReferenceEquals(member.Role, role) && member.Progress != null
+                && member.Attachment?.Cancelled != true;
+            _loop.PostOwned(member, () => _character.AddExpAsync(member, exp, 0, Current), "party exp share");
+        }
     }
 
     /// <summary>FieldExpRates (inferred): an open-field monster (NPCConfig._iWildMonsters 1) pays the rate of the killer's level.</summary>
@@ -206,6 +291,7 @@ public sealed class RewardService
         {
             if (!ReferenceEquals(player.Role, role) || player.Attachment?.Cancelled == true) return;
             await monster.RewardSettlement!.PresentAsync();
+            if (outcome.NoteGranted && SyncExplorationRestriction != null) await SyncExplorationRestriction(player);
             if (outcome.Items.Count > 0)
             {
                 var notify = new GetRewardNotify
@@ -222,7 +308,7 @@ public sealed class RewardService
         var granted = outcome.Items.Select(i => (i.Entry, Count: (long)i.Count)).ToList();
         if (outcome.BaseExp > 0) granted.Add((BaseExpItem, outcome.BaseExp));
         if (outcome.JobExp > 0) granted.Add((JobExpItem, outcome.JobExp));
-        foreach (var handler in KillDropsGranted)
+        foreach (var handler in KillDropsGranted.Handlers)
         {
             if (!ReferenceEquals(player.Role, role) || player.Attachment?.Cancelled == true) return;
             await handler(player, monster, granted);
@@ -311,24 +397,27 @@ public sealed class RewardService
     /// </summary>
     /// <summary>A kill's pools: <paramref name="monsterLevel"/> is the slain monster's level (DropAttenuationConfig); a
     /// DropGroupConfig row with an _iQuestLimit drops only while the killer has that quest under way.</summary>
-    private void RollPools(JsonElement row, GameSession player, List<(int, int)> drops, int monsterLevel)
+    /// <param name="rate">‱ applied to each slot's chance, capped at certain (TeamService.DropBonus): a slot that always
+    /// drops, like the EXP slots, is not drawn twice.</param>
+    private void RollPools(JsonElement row, GameSession player, List<(int, int)> drops, int monsterLevel, int rate = 10000)
     {
         foreach (long poolId in DropPools(row))
-            RollPool(poolId, player.Progress!, drops, null, monsterLevel, quest => TaskService.IsActive(player, quest));
+            RollPool(poolId, player.Progress!, drops, null, monsterLevel, quest => TaskService.IsActive(player, quest), rate);
     }
 
     private void RollPool(long poolId, GameSession player, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null)
         => RollPool(poolId, player.Progress!, drops, bound);
 
     private void RollPool(long poolId, RoleProgress progress, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null,
-        int monsterLevel = DropAttenuation.NoMonster, Func<long, bool>? questActive = null)
+        int monsterLevel = DropAttenuation.NoMonster, Func<long, bool>? questActive = null, int rate = 10000)
     {
         if (_data.Row("DropPoolConfig", poolId) is not { } pool) return;
         foreach (var (group, chance, rolls, picks) in PoolSlots(pool))
         {
+            double odds = Math.Min(1_000_000d, (double)chance * rate / 10000);
             for (int r = 0; r < rolls; r++)
             {
-                if (_random.NextDouble() * 1_000_000 >= chance) continue;
+                if (_random.NextDouble() * 1_000_000 >= odds) continue;
                 PickFromGroup(group, progress, drops, bound, monsterLevel, questActive, picks);
             }
         }

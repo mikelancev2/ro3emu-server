@@ -10,7 +10,7 @@ namespace Ro3Emu.Server.Game;
 /// Placement, refresh-time units, and terminal Idle ordering are inferred from the client;
 /// the concrete source/config/client contracts are cited there. All mutable state runs on GameLoop.
 /// </summary>
-public sealed class GatheringService : IGameTicker
+public sealed partial class GatheringService : IGameTicker
 {
     public const uint Interaction = 32700;
     public const uint StateChange = 32702;
@@ -46,10 +46,10 @@ public sealed class GatheringService : IGameTicker
         this._character = character;
         this._functions = functions;
         this._log = log;
-        scene.Loaded.Add(s => s.InstanceId == 0 ? EnsureSpawnedAsync(s.RuntimeMap) : Task.CompletedTask);
-        scene.Leaving.Add(s => InterruptAsync(s));
-        lines.HasPendingWork.Add(HasPendingWork);
-        lines.Retiring.Insert(0, RetireRuntimeAsync);
+        scene.Loaded.Subscribe(s => s.InstanceId == 0 ? EnsureSpawnedAsync(s.RuntimeMap) : Task.CompletedTask);
+        scene.Leaving.Subscribe(s => InterruptAsync(s));
+        lines.HasPendingWork.Subscribe(HasPendingWork);
+        lines.Retiring.Subscribe(RetireRuntimeAsync, order: PublicLineManager.RetireOrderGathering);
     }
 
     private sealed class GatherRuntime
@@ -199,7 +199,7 @@ public sealed class GatheringService : IGameTicker
                 InteractDistance = Math.Max(1, GameData.Int(npc, "_iInteractDistance")),
                 SharedLimit = NthInt(npc, "_iCTimes", 0), PersonalLimit = NthInt(npc, "_iCTimes", 1),
                 CooldownSeconds = Math.Max(0, (int)GameData.Int(npc, "_iInterval")),
-                BornTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                BornTimeMs = _loop.NowMs,
             };
             group.Occupied.Add(point.Id);
             _nodes[node.Uid] = node;
@@ -252,7 +252,7 @@ public sealed class GatheringService : IGameTicker
     public async Task<bool> TryInteractAsync(GameSession session, NpcInteractionReq req)
     {
         if (!_nodes.TryGetValue(req.NpcUid, out var node)) return false;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long now = _loop.NowMs;
         int interactionError = session.Role == null ? ErrorCodes.NpcMissing : InteractionCondition(session, node);
         int code = session.Role == null ? ErrorCodes.NpcMissing
             : session.SceneLoading || session.SceneEntry != node.SceneEntry || session.WorldScene != node.WorldScene
@@ -277,9 +277,7 @@ public sealed class GatheringService : IGameTicker
         {
             // The client starts the game after PublicParamConfig's countdown, then runs
             // LifeGameConfig._iDuration before posting 33516 (inferred from UI/config).
-            var param = _data.Table("PublicParamConfig");
-            int countdown = param.TryGetValue("LifeJobGameCountdown", out var seconds)
-                ? Math.Max(0, (int)(GameData.Number(seconds) ?? 0)) * 1000 : 0;
+            int countdown = Math.Max(0, (int)(Data.Config.PublicParams.Of(_data).LifeJobGameCountdown ?? 0)) * 1000;
             duration = countdown + Math.Max(1, (int)GameData.Int(game, "_iDuration"));
         }
         else gameId = 0;
@@ -345,10 +343,10 @@ public sealed class GatheringService : IGameTicker
     private async Task CompleteAsync(GameSession session, long nodeUid)
     {
         if (!_pending.TryGetValue(session, out var pending) || pending.Node.Uid != nodeUid || pending.GameId != 0) return;
-        if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < pending.EndMs)
+        if (_loop.NowMs < pending.EndMs)
         {
             if (_runtimes.TryGetValue(pending.Node.RuntimeMap, out var owner))
-                Schedule(owner, TimeSpan.FromMilliseconds(pending.EndMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+                Schedule(owner, TimeSpan.FromMilliseconds(pending.EndMs - _loop.NowMs),
                     () => CompleteAsync(session, nodeUid), session);
             return;
         }
@@ -364,7 +362,7 @@ public sealed class GatheringService : IGameTicker
             ? ErrorCodes.NpcParameter : 0;
         if (code == 0)
         {
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long now = _loop.NowMs;
             if (now < pending!.EndMs || now > pending.EndMs + 5000) code = ErrorCodes.Cooldown;
             else
             {
@@ -445,7 +443,7 @@ public sealed class GatheringService : IGameTicker
                                     node.TotalCollectCount++;
                                     node.PersonalCounts[session.Role!.Id] = PersonalCount(session, node);
                                     if (node.CooldownSeconds > 0)
-                                        node.Cooldowns[session.Role.Id] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + node.CooldownSeconds;
+                                        node.Cooldowns[session.Role.Id] = _loop.NowSec + node.CooldownSeconds;
                                     pending.Committed = true;
                                 });
                         }
@@ -553,7 +551,7 @@ public sealed class GatheringService : IGameTicker
                 if (resolved.Life.GeneralCollectionTimesByMap.TryGetValue(node.SceneEntry, out var counts))
                     node.PersonalCounts[resolved.RoleId] = counts.Times.GetValueOrDefault(node.Source.Id);
                 if (node.CooldownSeconds > 0)
-                    node.Cooldowns[resolved.RoleId] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + node.CooldownSeconds;
+                    node.Cooldowns[resolved.RoleId] = _loop.NowSec + node.CooldownSeconds;
             }
         }
         if (_pending.TryGetValue(session, out var current) && ReferenceEquals(current, pending)) _pending.Remove(session);
@@ -570,7 +568,7 @@ public sealed class GatheringService : IGameTicker
             || !_nodes.ContainsKey(node.Uid) || node.Depleted || !Near(session, node)
             || Moved(session.Position, pending.StartPosition)) return ErrorCodes.NpcMissing;
         if (node.PersonalLimit > 0 && PersonalCount(session, node) >= node.PersonalLimit
-            || node.Cooldowns.GetValueOrDefault(session.Role.Id) >= DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            || node.Cooldowns.GetValueOrDefault(session.Role.Id) >= _loop.NowSec)
             return ErrorCodes.Cooldown;
         int interactionError = InteractionCondition(session, node);
         return interactionError != 0 ? interactionError : _lifeJobs.CheckGather(session, node.CollectionId);

@@ -31,6 +31,13 @@ public sealed partial class SceneService
         worldData.Map(s.SceneEntry)?.Regions.TryGetValue(areaId, out var region) != true || Near(s, region!);
 
     /// <summary>
+    /// Whether the player stands near a region <paramref name="areaId"/> that exists in this map's scene editor data.
+    /// Unlike <see cref="NearRegion"/>, returns false when the map has no such region.
+    /// </summary>
+    public bool NearKnownRegion(GameSession s, long areaId) =>
+        worldData.Map(s.SceneEntry)?.Regions.TryGetValue(areaId, out var region) == true && Near(s, region!);
+
+    /// <summary>
     /// Whether the player stands within <paramref name="reach"/> m of an NPC <paramref name="npcId"/> of its map; true when
     /// the map places none (a quest NPC the client spawns itself, inferred).
     /// </summary>
@@ -44,7 +51,7 @@ public sealed partial class SceneService
     /// only when its direction changes: it is allowed what it can have walked since, up to 2 s (inferred), and nothing once the report is past the walk check's 5 s.</summary>
     private static bool Near(GameSession s, MapRegion region)
     {
-        double sinceWalk = (DateTime.UtcNow - s.LastWalkUtc).TotalSeconds;
+        double sinceWalk = (s.UtcNow - s.LastWalkUtc).TotalSeconds;
         float lag = s.Walking && sinceWalk is >= 0 and <= 5 ? s.Speed / 100f * (float)Math.Min(sinceWalk, 2) : 0;
         float dx = s.Position.X - region.X, dz = s.Position.Z - region.Z, reach = Math.Max(region.Width, region.Length) + 5 + lag;
         return !s.SceneLoading && dx * dx + dz * dz <= reach * reach;

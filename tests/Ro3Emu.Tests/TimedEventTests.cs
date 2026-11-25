@@ -30,7 +30,7 @@ public sealed class TimedEventTests : IAsyncLifetime
         var (port, micro, game) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = port; o.MicroGatePort = micro; o.GameGatePort = game;
             o.SeasonStart = "2026-10-05";
         }, _clock);
@@ -48,7 +48,6 @@ public sealed class TimedEventTests : IAsyncLifetime
         Service<TimedBattleService>().SettlementCompletedForTest = null;
         Service<AccountStore>().BeforeOwnedCommitForTest = null;
         await _app.StopAsync(); await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -214,7 +213,7 @@ public sealed class TimedEventTests : IAsyncLifetime
     /// The stone a "!rift" command just placed. The running round's random stones can sit on the same map point (and
     /// be any star), so a test never picks a stone by map and distance alone.
     /// </summary>
-    private async Task<TimedBattleService.RiftStone> GmRiftStoneAsync(BotClient bot, string command)
+    private async Task<RiftBattleService.RiftStone> GmRiftStoneAsync(BotClient bot, string command)
     {
         var before = await Service<GameLoop>().InvokeAsync(() =>
             Task.FromResult(Service<TimedBattleService>().RiftStones.Select(s => s.Uid).ToHashSet()));
@@ -916,7 +915,7 @@ public sealed class TimedEventTests : IAsyncLifetime
         Assert.Equal(0, (await Next(member, TeamService.TeamInviteeResp, InviteeRespResp.Parser)).Result);
     }
 
-    private static async Task<int> RiftEnterAsync(BotClient bot, TimedBattleService.RiftStone stone)
+    private static async Task<int> RiftEnterAsync(BotClient bot, RiftBattleService.RiftStone stone)
     {
         // The client names the stone by its unit uid (LC_SceneManagerNew.SendEnterDungeonWithOnePieceData).
         await bot.SendGameAsync(DungeonService.Enter, new EnterDungeonReq
@@ -928,7 +927,7 @@ public sealed class TimedEventTests : IAsyncLifetime
     }
 
     /// <summary>The leader's 30400, every member's 42033 + 30406, then everyone loads the one room.</summary>
-    private async Task<long> RiftFightAsync(TimedBattleService.RiftStone stone, BotClient leader, params BotClient[] others)
+    private async Task<long> RiftFightAsync(RiftBattleService.RiftStone stone, BotClient leader, params BotClient[] others)
     {
         Assert.Equal(0, await RiftEnterAsync(leader, stone));
         foreach (var member in others)
@@ -992,7 +991,7 @@ public sealed class TimedEventTests : IAsyncLifetime
         Session(bot).Synced.GetValueOrDefault(LifeJobService.RestrictSync) is DBRestrictInfo synced
             && synced.RestrictCount.TryGetValue(1020, out var info) ? info.Count : -1));
 
-    private Task<TimedBattleService.RiftStone[]> RiftStonesAsync() => Service<GameLoop>().InvokeAsync(() =>
+    private Task<RiftBattleService.RiftStone[]> RiftStonesAsync() => Service<GameLoop>().InvokeAsync(() =>
         Task.FromResult(Service<TimedBattleService>().RiftStones.ToArray()));
 
     [ClientDataFact]
@@ -1151,7 +1150,7 @@ public sealed class TimedEventTests : IAsyncLifetime
     {
         await using var bot = await InWorld("Rhea");
         await Gm(bot, "!lvl 99");
-        TimedBattleService.RiftStone[] round = [];
+        RiftBattleService.RiftStone[] round = [];
         for (int i = 0; i < 200 && round.Length == 0; i++)
         {
             round = await RiftStonesAsync();
@@ -1162,8 +1161,25 @@ public sealed class TimedEventTests : IAsyncLifetime
         Assert.All(round, s => Assert.InRange(s.Star, 1, 6));
         Assert.True(round.Count(s => s.Star == 6) <= 5);
 
+        var world = Service<WorldData>();
+        foreach (var spawn in round)
+        {
+            var at = spawn.Point;
+            Assert.Equal(at.Y, world.Map(spawn.Map)!.Nav!.WalkHeight(at.X, at.Z, at.Y));
+        }
+
         await WarpRiftMapAsync(bot);
+        // The walkable surface rises across the GM command's two-unit offset on this East Gate slope.
+        await Gm(bot, "!jump 322 295");
         var stone = await GmRiftStoneAsync(bot, "!rift 3 Gryphon");
+        var nav = world.Map(stone.Map)!.Nav!;
+        Assert.NotEqual(nav.WalkHeight(322, 295, stone.Point.Y), nav.WalkHeight(324, 295, stone.Point.Y));
+        var appeared = await Next(bot, GameAoiSink.SyncAoiView, AoIViewChangeData.Parser,
+            v => v.Bases.Any(b => b.Uuid == (ulong)stone.Uid));
+        var pos = appeared.Bases.Single(b => b.Uuid == (ulong)stone.Uid).MovementInfo.Pos;
+        Assert.Equal((324f, 295f), (pos.X, pos.Z));
+        Assert.Equal(nav.WalkHeight(pos.X, pos.Z, stone.Point.Y), pos.Y);
+        Assert.Equal(stone.Point.Y, pos.Y);
         Assert.Equal((10110L, 3, 3200201L), (stone.Map, stone.Star, stone.Scene));
         Assert.Equal(16000008, stone.Boss); // the third Gryphon (stars 1-5 are 16000006-16000010)
         // GM test aid: a one-member party may challenge (the data asks for 3-5).
@@ -1238,12 +1254,5 @@ public sealed class TimedEventTests : IAsyncLifetime
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.FromUnixTimeSeconds(Interlocked.Read(ref _seconds));
         public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
         public void Set(long value) => Interlocked.Exchange(ref _seconds, value);
-    }
-
-    private static string RepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "data", "config"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new DirectoryNotFoundException("data/config");
     }
 }

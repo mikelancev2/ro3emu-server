@@ -31,10 +31,9 @@ public sealed partial class MvpService : IGameTicker
 
     /// <summary>After a committed kill settlement, once per online participant (achievement 103011). Runs under the
     /// settlement's owner scope: listeners post their own work.</summary>
-    public List<Action<GameSession>> ParticipantSettled { get; } = [];
+    public SyncHook<GameSession> ParticipantSettled { get; } = new("MvpService.ParticipantSettled");
     private const int RefreshMessage = 603, DieMessage = 604; // PublicParamConfig.MVPRefreshMessage / MVPDieMessage
     private const int TeamCap = 3, JoinCap = 5, FirstCap = 3, EndCap = 3; // TeamAwardNum / PartAwardNum / FirstDamageAward / LastDamage
-    private const int ResetHour = 5;                                        // AwardNumRefreshTime
     private const int RankedTeams = 10;                                     // TeamAwardLeaderboardLimit
     private const long NoticeBeforeMs = 120_000;                            // RefreshUIShowTime
 
@@ -142,7 +141,7 @@ public sealed partial class MvpService : IGameTicker
         this._monsters = monsters;
         // Every monster carries its NPCConfig _kBornEventBuff from birth, not only the field MVPs (the MVPs' 900801 /
         // 900901 control immunity also stands on dungeon and story bosses).
-        monsters.Born.Add(ApplyBornBuffsAsync);
+        monsters.Born.Subscribe(ApplyBornBuffsAsync);
         this._worldData = worldData;
         this._character = character;
         this._rewards = rewards;
@@ -155,20 +154,20 @@ public sealed partial class MvpService : IGameTicker
         this._combat = combat;
         // No tick retry (as before the shared component): an undelivered award waits for the next kill's delivery
         // pass or the next login, and a refused delivery stops that pass.
-        _awardObligations = new RoleObligations<MvpObligationRow>("MVP award", accounts, loop, TimeProvider.System,
+        _awardObligations = new RoleObligations<MvpObligationRow>("MVP award", accounts, loop, loop.Time,
             role => sessions.All().FirstOrDefault(s => s.Role?.Id == role), s => s.Progress != null, PayAsync,
             ObligationRetry.NextRecovery, log);
-        combat.EventDamageRecorded.Add((s, m, damage) => { OnDealt(s, m, damage); return Task.CompletedTask; });
-        combat.Taken.Add(OnTaken);
-        combat.BeforeLethalPublication.Add(PrepareKilledAsync);
-        combat.AfterLethalPublication.Add(FinalizePreparedAsync);
-        combat.LethalHitRolledBack.Add(RollbackUnpublishedLethal);
-        combat.Killed.Add(OnKilledAsync);
-        combat.IncomingDamageAdjusters.Add((m, _, _, damage) => Task.FromResult(FrenzyDealt(m, damage)));
-        combat.DamageAdjusters.Add((_, m, _, _, damage) => FrenzyTaken(m, damage));
-        scene.PublicLineOpened.Add(ActivateLine);
-        lines.HasPendingWork.Add(HasPendingWork);
-        lines.Retiring.Insert(0, RetireLineAsync);
+        combat.EventDamageRecorded.Subscribe((s, m, damage) => { OnDealt(s, m, damage); return Task.CompletedTask; });
+        combat.Taken.Subscribe(OnTaken);
+        combat.BeforeLethalPublication.Subscribe(PrepareKilledAsync);
+        combat.AfterLethalPublication.Subscribe(FinalizePreparedAsync);
+        combat.LethalHitRolledBack.Subscribe(RollbackUnpublishedLethal);
+        combat.Killed.Subscribe(OnKilledAsync);
+        combat.IncomingDamageAdjusters.Subscribe((m, _, _, damage) => Task.FromResult(FrenzyDealt(m, damage)));
+        combat.DamageAdjusters.Subscribe((_, m, _, _, damage) => FrenzyTaken(m, damage));
+        scene.PublicLineOpened.Subscribe(ActivateLine);
+        lines.HasPendingWork.Subscribe(HasPendingWork);
+        lines.Retiring.Subscribe(RetireLineAsync, order: PublicLineManager.RetireOrderMvp);
     }
 
     // ---- client requests ----
@@ -247,7 +246,7 @@ public sealed partial class MvpService : IGameTicker
             {
                 case "spawn":
                     if (st.Unit is { Dead: false }) return $"MVP {cfg} is alive on {st.Def.MapId}.";
-                    await SaveStateAsync(st, MVP_STATE.Born, MonsterService.NowMs);
+                    await SaveStateAsync(st, MVP_STATE.Born, _loop.NowMs);
                     return $"MVP {cfg} {NpcName(st.Def.NpcId)} respawns on {st.Def.MapId} {_data.MapName(st.Def.MapId)}.";
                 case "weaken":
                     if (st.Unit is not { Dead: false } w) return $"MVP {cfg} is not alive.";
@@ -260,7 +259,7 @@ public sealed partial class MvpService : IGameTicker
             }
         }
         return string.Join("; ", states.Values.OrderBy(x => x.Def.CfgId).Select(x =>
-            $"{x.Def.CfgId} {NpcName(x.Def.NpcId)} @{x.Def.MapId} {x.Phase}{(x.Phase == MVP_STATE.Reborn ? $" in {(x.StateTimeMs + x.Def.RefreshMs - MonsterService.NowMs) / 60000} min" : "")}"));
+            $"{x.Def.CfgId} {NpcName(x.Def.NpcId)} @{x.Def.MapId} {x.Phase}{(x.Phase == MVP_STATE.Reborn ? $" in {(x.StateTimeMs + x.Def.RefreshMs - _loop.NowMs) / 60000} min" : "")}"));
     }
 
     // ---- life cycle ----
@@ -270,7 +269,7 @@ public sealed partial class MvpService : IGameTicker
     {
         if (runtime.Kind != RuntimeMapKind.PublicLine || runtime.Id == 1 || _lineStates.ContainsKey(runtime)) return;
         var states = new Dictionary<int, State>();
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         foreach (var basis in States().Values.Where(s => s.Def.MapId == runtime.SceneEntry))
         {
             long death = Math.Max(_lastDeath.GetValueOrDefault(basis.Def.CfgId),
@@ -342,7 +341,7 @@ public sealed partial class MvpService : IGameTicker
         _sinceCheck += time.Delta;
         if (_sinceCheck < TimeSpan.FromSeconds(1)) return;
         _sinceCheck = TimeSpan.Zero;
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         foreach (var (monster, prepared) in _preparedKills.ToArray())
             if (monster.Dead && !prepared.State.Retired && !prepared.Finalizing)
                 _loop.TrackRuntimeDetached("MVP finalize committed death", () => FinalizePreparedAsync(monster));
@@ -374,7 +373,7 @@ public sealed partial class MvpService : IGameTicker
                     st.Transitioning = true;
                     _loop.TrackRuntimeDetached("MVP respawn", async () =>
                     {
-                        try { await SaveStateAsync(st, MVP_STATE.Born, MonsterService.NowMs, onlyIfReborn: true); }
+                        try { await SaveStateAsync(st, MVP_STATE.Born, _loop.NowMs, onlyIfReborn: true); }
                         finally { st.Transitioning = false; }
                     });
                 }
@@ -469,7 +468,7 @@ public sealed partial class MvpService : IGameTicker
         if (_preparedKills.ContainsKey(m)) return;
         if (_unknownKills.ContainsKey(m)) throw new EventSettlementOutcomeUnknownException(
             "MVP settlement source is awaiting resolution.", new InvalidOperationException("Frozen source is unresolved."));
-        long now = MonsterService.NowMs;
+        long now = _loop.NowMs;
         string parentSource = $"mvp/kill/{st.Def.CfgId}/{st.Runtime.LineNumber}/{m.Uid}/{now}";
         string killerName = killerRole?.Name ?? "";
         st.Pending++;
@@ -741,7 +740,7 @@ public sealed partial class MvpService : IGameTicker
                 new EconomyOwner(EconomyOwnerKind.Role, x.PlayerId.ToString(CultureInfo.InvariantCulture)),
                 goods[index].Asset, x.Grant.Count)).ToArray();
             builder.WithEventEconomy(new EventEconomyMutation(catalog, Guid.NewGuid().ToString("N"), "realm", 0,
-                "event/mvp-settlement", parentSource, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                "event/mvp-settlement", parentSource, _loop.NowMs,
                 [], goods, deltas, JsonSerializer.SerializeToUtf8Bytes(new
                 {
                     st.Def.CfgId, DeadMs = deadMs,
@@ -763,7 +762,7 @@ public sealed partial class MvpService : IGameTicker
         });
         StoreReports(st, killer, deadMs, rarePlayer, rareTeam, scores, teamsRanked, awards);
         foreach (var participant in online.Values)
-            foreach (var handler in ParticipantSettled)
+            foreach (var handler in ParticipantSettled.Handlers)
                 try { handler(participant); }
                 catch (Exception e) { _log.LogError(e, "MVP participant hook failed for {Role}", participant.Role?.Id); }
         return [.. obligations];
@@ -790,10 +789,9 @@ public sealed partial class MvpService : IGameTicker
     /// five or more 50 (order inferred: "the more such members, the greater the decay").</summary>
     internal static int DecayPercent(GameData data, int capped)
     {
-        if (capped <= 0 || !data.Table("PublicParamConfig").TryGetValue("RewardDecayRatio", out var list)
-            || list.ValueKind != JsonValueKind.Array) return 100;
-        var ratios = list.EnumerateArray().Select(v => (int)(GameData.Number(v) ?? 100)).OrderByDescending(v => v).ToArray();
-        return ratios.Length == 0 ? 100 : ratios[Math.Min(capped, ratios.Length) - 1];
+        if (capped <= 0 || Data.Config.PublicParams.Of(data).RewardDecayRatio is not { Length: > 0 } raw) return 100;
+        var ratios = raw.Select(v => (int)v).OrderByDescending(v => v).ToArray();
+        return ratios[Math.Min(capped, ratios.Length) - 1];
     }
 
     /// <summary>MVPScoreConfig points by rank in each statistic, deaths subtract (inferred).</summary>
@@ -901,7 +899,7 @@ public sealed partial class MvpService : IGameTicker
             var def = new Def(cfg, npc, GameData.Int(row, "_iMapID"), (int)(GameData.Int(npcRow, "_iLevel") + GameData.Int(row, "_iLevelDiff")),
                 Math.Max(60, GameData.Int(row, "_iRefreshTime")) * 1000, GameData.Int(row, "_iFirstDamageAward"), GameData.Int(row, "_iLastDamageAward"),
                 GameData.Int(row, "_iTeamAward"), GameData.Int(row, "_iPartAward"), GameData.Int(row, "_iRareAward"), (int)GameData.Int(row, "_iRareRewardProbability"));
-            states[cfg] = new State { Def = def, Runtime = RuntimeMapKey.Public(def.MapId), StateTimeMs = MonsterService.NowMs };
+            states[cfg] = new State { Def = def, Runtime = RuntimeMapKey.Public(def.MapId), StateTimeMs = _loop.NowMs };
         }
         foreach (var row in _accounts.ReadSync<List<MvpStateRow>>(new MvpReadPlan(MvpReadKind.States)))
         {
@@ -947,12 +945,11 @@ public sealed partial class MvpService : IGameTicker
             info.TeamNum = row.Team;
             info.LastTime = row.Last;
         }
-        var now = DateTime.Now;
-        var lastReset = now.Date.AddHours(ResetHour) is var today && now >= today ? today : today.AddDays(-1);
-        if (DateTimeOffset.FromUnixTimeMilliseconds(info.LastTime).LocalDateTime < lastReset)
+        long lastResetMs = GameCalendar.DayStart(_loop.Time).ToUnixTimeMilliseconds();
+        if (info.LastTime < lastResetMs)
         {
             info.FirstNum = info.EndNum = info.JoinNum = info.TeamNum = 0;
-            info.LastTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            info.LastTime = _loop.NowMs;
             return (info, true);
         }
         return (info, false);

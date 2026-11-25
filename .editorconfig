@@ -89,15 +89,15 @@ dotnet_diagnostic.CA1725.severity = suggestion
 dotnet_diagnostic.CA1805.severity = suggestion
 # 163: mark members as static
 dotnet_diagnostic.CA1822.severity = suggestion
-# 372: use LoggerMessage delegates
+# 370: use LoggerMessage delegates
 dotnet_diagnostic.CA1848.severity = suggestion
-# 59: use concrete types for performance
+# 56: use concrete types for performance
 dotnet_diagnostic.CA1859.severity = suggestion
 # 100: avoid constant arrays as arguments
 dotnet_diagnostic.CA1861.severity = suggestion
 # 10: cache and reuse JsonSerializerOptions
 dotnet_diagnostic.CA1869.severity = suggestion
-# 144: avoid potentially expensive logging
+# 142: avoid potentially expensive logging
 dotnet_diagnostic.CA1873.severity = suggestion
 # 15: instantiate argument exceptions correctly
 dotnet_diagnostic.CA2208.severity = suggestion

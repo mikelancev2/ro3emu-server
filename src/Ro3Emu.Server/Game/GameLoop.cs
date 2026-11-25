@@ -40,8 +40,9 @@ public sealed partial class GameLoop : IHostedService, IDisposable
     private readonly AutoResetEvent _workAvailable = new(false);
     private readonly ServerMetrics? _metrics;
     private readonly List<IGameTicker> _tickers = [];
+    private IGameTicker[] _tickersSnapshot = [];
     private readonly PriorityQueue<Func<Task>, TimeSpan> _timers = new();
-    private readonly Stopwatch _clock = new();
+    private readonly TimeProvider _time;
     private readonly ILogger<GameLoop> _log;
     private readonly Thread _thread;
     private readonly LoopContext _context;
@@ -60,23 +61,35 @@ public sealed partial class GameLoop : IHostedService, IDisposable
     private readonly HashSet<string> _orphanSites = [];
     /// <summary>Never closes and is never counted as outstanding work.</summary>
     private WorkPermit _orphan = null!;
-    private bool _started;
+    private long _startedAt;
+    private volatile bool _started;
     private bool _disposeRequested;
     private bool _queueDisposed;
     private TimeSpan _lastTick;
+    private TimeSpan _nextTick = TickInterval;
     private TimeSpan _nextStuckScan;
 
-    public GameLoop(ILogger<GameLoop> log, ServerMetrics? metrics = null)
+    public GameLoop(ILogger<GameLoop> log, ServerMetrics? metrics = null, TimeProvider? time = null)
     {
         _log = log;
         _metrics = metrics;
+        _time = time ?? TimeProvider.System;
         _orphan = new WorkPermit(this, 0, "orphan continuation", false, 0) { RefCount = int.MaxValue / 2 };
         _context = new LoopContext(this);
         _thread = new Thread(Run) { IsBackground = true, Name = "game-loop" };
     }
 
+    /// <summary>The realm's unified clock.</summary>
+    public TimeProvider Time => _time;
+
     /// <summary>Monotonic game time.</summary>
-    public TimeSpan Now => _clock.Elapsed;
+    public TimeSpan Now => _started ? _time.GetElapsedTime(_startedAt) : TimeSpan.Zero;
+
+    /// <summary>Current realm UTC wall clock in Unix milliseconds.</summary>
+    public long NowMs => _time.GetUtcNow().ToUnixTimeMilliseconds();
+
+    /// <summary>Current realm UTC wall clock in Unix seconds.</summary>
+    public long NowSec => _time.GetUtcNow().ToUnixTimeSeconds();
 
     internal Ownership.OwnerRegistry? Owners { get; set; }
     /// <summary>Admitted work older than this is reported once as stuck, connections excepted (inferred; server tuning).</summary>
@@ -106,8 +119,8 @@ public sealed partial class GameLoop : IHostedService, IDisposable
     /// <summary>Registers a ticker (from the loop or before start).</summary>
     public void Add(IGameTicker ticker)
     {
-        if (_thread.IsAlive && !IsOnLoop) Post(() => { _tickers.Add(ticker); return Task.CompletedTask; });
-        else _tickers.Add(ticker);
+        if (_thread.IsAlive && !IsOnLoop) Post(() => { _tickers.Add(ticker); _tickersSnapshot = [.. _tickers]; return Task.CompletedTask; });
+        else { _tickers.Add(ticker); _tickersSnapshot = [.. _tickers]; }
     }
 
     public void Remove(IGameTicker ticker) => TryRemove(ticker, null);
@@ -123,11 +136,12 @@ public sealed partial class GameLoop : IHostedService, IDisposable
                 // A stopped loop never ticks this list again. Test phase and ordinary admission
                 // together so shutdown cannot begin between them.
                 if (_phase != GameLoopPhase.Accepting) return false;
-                Post(() => { _tickers.Remove(ticker); onRemoved?.Invoke(); return Task.CompletedTask; });
+                Post(() => { _tickers.Remove(ticker); _tickersSnapshot = [.. _tickers]; onRemoved?.Invoke(); return Task.CompletedTask; });
                 return true;
             }
         }
         _tickers.Remove(ticker);
+        _tickersSnapshot = [.. _tickers];
         onRemoved?.Invoke();
         return true;
     }
@@ -248,6 +262,32 @@ public sealed partial class GameLoop : IHostedService, IDisposable
     /// <summary>Runs work on the loop and completes when it has finished (inline when already on the loop).</summary>
     public Task InvokeAsync(Func<Task> work) => InvokeAsync(async () => { await work(); return true; });
 
+    /// <summary>
+    /// Advances a controllable clock in <see cref="TickInterval"/> slices, executing every due timer and ticker on the
+    /// loop thread deterministically without sleeping for wall time.
+    /// </summary>
+    public async Task AdvanceAsync(TimeSpan duration, Action<TimeSpan> advanceClock)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(duration, TimeSpan.Zero);
+        ArgumentNullException.ThrowIfNull(advanceClock);
+        if (!_started) throw new InvalidOperationException("The game loop has not started.");
+        if (IsOnLoop) throw new InvalidOperationException("Cannot advance the game loop clock from the loop thread.");
+
+        var remaining = duration;
+        while (remaining > TimeSpan.Zero && Phase == GameLoopPhase.Accepting)
+        {
+            var step = remaining > TickInterval ? TickInterval : remaining;
+            remaining -= step;
+            advanceClock(step);
+            while (Phase == GameLoopPhase.Accepting
+                && await InvokeAsync(() => Task.FromResult(Now >= _nextTick)).ConfigureAwait(false))
+            {
+            }
+            if (Phase == GameLoopPhase.Accepting)
+                await InvokeAsync(() => Task.CompletedTask).ConfigureAwait(false);
+        }
+    }
+
     public Task<T> InvokeAsync<T>(Func<Task<T>> work)
     {
         if (IsOnLoop)
@@ -320,7 +360,7 @@ public sealed partial class GameLoop : IHostedService, IDisposable
     {
         var previous = SynchronizationContext.Current;
         var priorPermit = _currentPermit.Value;
-        SynchronizationContext.SetSynchronizationContext(new LoopContext(this, permit));
+        SynchronizationContext.SetSynchronizationContext(permit.Context);
         _currentPermit.Value = permit;
         try { return FinishTracked(work, permit); }
         finally { _currentPermit.Value = priorPermit; SynchronizationContext.SetSynchronizationContext(previous); }
@@ -398,9 +438,9 @@ public sealed partial class GameLoop : IHostedService, IDisposable
             ObjectDisposedException.ThrowIf(_disposeRequested, this);
             if (_phase != GameLoopPhase.Accepting) throw new InvalidOperationException("The game loop has stopped.");
             if (_started) throw new InvalidOperationException("The game loop has already started.");
-            _clock.Start();
-            _thread.Start();
+            _startedAt = _time.GetTimestamp();
             _started = true;
+            _thread.Start();
         }
         return Task.CompletedTask;
     }
@@ -456,13 +496,13 @@ public sealed partial class GameLoop : IHostedService, IDisposable
             SynchronizationContext.SetSynchronizationContext(_context);
             ServerMetrics.LoopOwner = _metrics;
             using var waiter = new HighResolutionWaiter(_workAvailable);
-            var nextTick = TickInterval;
+            _nextTick = TickInterval;
             long itemTicks = 0;
             int items = 0;
             while (!_queue.IsCompleted)
             {
-                var now = _clock.Elapsed;
-                if (now >= nextTick)
+                var now = Now;
+                if (now >= _nextTick)
                 {
                     long tickStart = Stopwatch.GetTimestamp();
                     // Independent deadlines cannot monopolize the loop. A non-preemptible callback can still overrun;
@@ -477,8 +517,9 @@ public sealed partial class GameLoop : IHostedService, IDisposable
                         double lateness = (Now - due).TotalMilliseconds;
                         var prior = SynchronizationContext.Current;
                         var priorPermit = _currentPermit.Value;
-                        SynchronizationContext.SetSynchronizationContext(new LoopContext(this, permit));
+                        SynchronizationContext.SetSynchronizationContext(permit.Context);
                         _currentPermit.Value = permit;
+                        WorkSerial++;
                         try { _ = RunGuarded(timer, permit); }
                         finally { _currentPermit.Value = priorPermit; SynchronizationContext.SetSynchronizationContext(prior); }
                         _metrics?.RecordTimer(lateness, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
@@ -487,15 +528,19 @@ public sealed partial class GameLoop : IHostedService, IDisposable
                     if (Phase != GameLoopPhase.Accepting) _timers.Clear();
                     var time = new GameTime(now, now - _lastTick);
                     _lastTick = now;
+                    if (Owners?.Reservations.Pulse() == true)
+                        LogRealmPriorityStoodAside(_log, Ownership.ReservationCoordinator.StallGrace.TotalSeconds, Owners.LongHeld(TimeSpan.Zero));
                     long tickerStart = Stopwatch.GetTimestamp();
-                    foreach (var ticker in Phase == GameLoopPhase.Accepting ? _tickers.ToArray() : [])
+                    TickSerial++;
+                    foreach (var ticker in Phase == GameLoopPhase.Accepting ? _tickersSnapshot : [])
                     {
                         if (!TryAdmit("ticker " + ticker.GetType().Name, cleanup: false, out var tickerPermit)) break;
                         long one = Stopwatch.GetTimestamp();
                         var prior = SynchronizationContext.Current;
                         var priorPermit = _currentPermit.Value;
-                        SynchronizationContext.SetSynchronizationContext(new LoopContext(this, tickerPermit));
+                        SynchronizationContext.SetSynchronizationContext(tickerPermit.Context);
                         _currentPermit.Value = tickerPermit;
+                        WorkSerial++;
                         try { TickOwned(ticker, time); }
                         catch (Exception e) { _log.LogError(e, "Ticker {Ticker} failed", ticker.GetType().Name); }
                         finally
@@ -515,9 +560,10 @@ public sealed partial class GameLoop : IHostedService, IDisposable
                     if (_metrics != null && _queue.Count > BurstQueueLength) RecordBurst();
                     items = 0; itemTicks = 0;
                     // Keep the 50 ms phase; skip missed deadlines rather than running a catch-up ticker storm.
-                    nextTick += TickInterval;
-                    if (nextTick <= _clock.Elapsed)
-                        nextTick += TimeSpan.FromTicks(((_clock.Elapsed - nextTick).Ticks / TickInterval.Ticks + 1) * TickInterval.Ticks);
+                    _nextTick += TickInterval;
+                    var after = Now;
+                    if (_nextTick <= after)
+                        _nextTick += TimeSpan.FromTicks(((after - _nextTick).Ticks / TickInterval.Ticks + 1) * TickInterval.Ticks);
                 }
                 // Always give queued work one turn after a timer/ticker batch, even if that batch overran.
                 if (_queue.TryTake(out var item))
@@ -530,7 +576,7 @@ public sealed partial class GameLoop : IHostedService, IDisposable
                     if (_metrics != null && Stopwatch.GetElapsedTime(started, finished).TotalMilliseconds >= SlowItemMs)
                         _metrics.RecordSlowItem(Describe(item.Callback, item.State), Stopwatch.GetElapsedTime(started, finished).TotalMilliseconds);
                 }
-                else if (!_queue.IsCompleted) waiter.Wait(nextTick - _clock.Elapsed);
+                else if (!_queue.IsCompleted) waiter.Wait(_nextTick - Now);
             }
         }
         finally
@@ -568,20 +614,36 @@ public sealed partial class GameLoop : IHostedService, IDisposable
     {
         object? target = state ?? callback.Target;
         if (target == null) return callback.Method.DeclaringType?.Name + "." + callback.Method.Name;
+        // An await continuation posts the state machine's MoveNext as a plain Action: name what it resumes.
+        if (target is Delegate posted)
+        {
+            if (!IsStateMachine(posted.Target?.GetType()))
+                return (posted.Method.DeclaringType?.FullName?.Split('.').Last() ?? "?") + "." + posted.Method.Name;
+            target = posted.Target!;
+        }
         var type = target.GetType();
-        if (type.IsGenericType && type.Name.StartsWith("AsyncStateMachineBox"))
-            return type.GetGenericArguments().Last().FullName?.Split('.').Last() ?? type.Name;
+        if (IsStateMachine(type)) return type.GetGenericArguments().Last().FullName?.Split('.').Last() ?? type.Name;
         foreach (var field in type.GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
             if (field.GetValue(target) is Delegate inner && inner.Method.DeclaringType != typeof(GameLoop))
                 return (inner.Method.DeclaringType?.FullName?.Split('.').Last() ?? "?") + "." + inner.Method.Name;
         return type.FullName?.Split('.').Last() ?? type.Name;
     }
 
+    private static bool IsStateMachine(Type? type) => type is { IsGenericType: true } && type.Name.StartsWith("AsyncStateMachineBox");
+
+    /// <summary>Counts the work the loop runs: each queued item, timer and ticker gets a new number. A memo keyed by it
+    /// (CharacterService.Stats) can never outlive the work it was made in.</summary>
+    public long WorkSerial { get; private set; }
+
+    /// <summary>Counts 50 ms game loop ticks.</summary>
+    public long TickSerial { get; private set; }
+
     private void Execute((SendOrPostCallback Callback, object? State, long EnqueuedAt, WorkPermit Permit) item)
     {
+        WorkSerial++;
         var previous = SynchronizationContext.Current;
         var priorPermit = _currentPermit.Value;
-        SynchronizationContext.SetSynchronizationContext(new LoopContext(this, item.Permit));
+        SynchronizationContext.SetSynchronizationContext(item.Permit.Context);
         _currentPermit.Value = item.Permit;
         try { item.Callback(item.State); }
         catch (Exception e)
@@ -666,6 +728,8 @@ public sealed partial class GameLoop : IHostedService, IDisposable
         public readonly string Name = name;
         public readonly bool Cleanup = cleanup;
         public readonly long StartedAt = startedAt;
+        private LoopContext? _context;
+        internal LoopContext Context => _context ??= new LoopContext(Owner, this);
         public bool OrdinarySlot;
         public bool LongLived, StuckReported;
         public WorkPermit? Parent;
@@ -691,7 +755,7 @@ public sealed partial class GameLoop : IHostedService, IDisposable
         }
     }
 
-    private sealed class LoopContext(GameLoop loop, WorkPermit? permit = null) : SynchronizationContext
+    internal sealed class LoopContext(GameLoop loop, WorkPermit? permit = null) : SynchronizationContext
     {
         internal WorkPermit? Permit => permit;
         public override void Post(SendOrPostCallback d, object? state)
@@ -707,4 +771,7 @@ public sealed partial class GameLoop : IHostedService, IDisposable
 
         public override SynchronizationContext CreateCopy() => this;
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Realm priority stood aside: nothing was released for {Grace} s while a realm request waited. Holders: {Held}")]
+    private static partial void LogRealmPriorityStoodAside(ILogger logger, double grace, string held);
 }

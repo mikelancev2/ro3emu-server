@@ -46,7 +46,6 @@ public sealed class RaidTrialTests : IAsyncLifetime
     {
         await _app.StopAsync();
         await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
@@ -373,7 +372,7 @@ public sealed class RaidTrialTests : IAsyncLifetime
         await Strike(alice, orc);
         await Tip(alice, 4314405); // the shield broke and dropped
         await UntilBuffGone(alice, 4310401);
-        Assert.True(await Service<GameLoop>().InvokeAsync(() => Task.FromResult(orc.BusyUntilMs > MonsterService.NowMs))); // staggered
+        Assert.True(await Service<GameLoop>().InvokeAsync(() => Task.FromResult(orc.BusyUntilMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))); // staggered
 
         await Gm(alice, "!raidtrial 2");
         await Tip(alice, 4314406);
@@ -406,7 +405,7 @@ public sealed class RaidTrialTests : IAsyncLifetime
         var barrels = drake.Template.Skills!.Skills.Single(k => k.Id == 4323101);
         await OnLoop(async () =>
         {
-            foreach (var landed in Service<CombatService>().BossAreaLanded) await landed(drake, barrels, ships[1].Pos, ships[1].Pos, 0);
+            await Service<CombatService>().BossAreaLanded.InvokeAsync(drake, barrels, ships[1].Pos, ships[1].Pos, 0);
         });
         Assert.Single(await InRoom<DungeonService.SceneActorUnit>(instance, u => u.NpcId == 43200007));
         // 20 m ahead of the other ship, in its lane.
@@ -503,7 +502,7 @@ public sealed class RaidTrialTests : IAsyncLifetime
             bug.Moving = false;
             bug.X = burrow.X + 1;
             bug.Z = burrow.Z;
-            bug.BusyUntilMs = MonsterService.NowMs + 60000;
+            bug.BusyUntilMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 60000;
         });
         await Next(alice, CombatService.UseInSkill, UseInSkillInfo.Parser, u => u.SrcID == bug.Uid && u.SkillID == 4305901); // he burrows
         await UntilGone(instance, 4300002);
@@ -590,7 +589,7 @@ public sealed class RaidTrialTests : IAsyncLifetime
         var (instance, osiris) = await RaidFight(alice, 50102, 3, 3120601, 4360004);
         long max = MaxHp(alice);
         Pace(50); // a pulse every 2 s
-        await OnLoop(() => { osiris.Moving = false; osiris.BusyUntilMs = MonsterService.NowMs + 60000; return Task.CompletedTask; });
+        await OnLoop(() => { osiris.Moving = false; osiris.BusyUntilMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 60000; return Task.CompletedTask; });
         await Gm(alice, "!raidtrial 1");
         await Tip(alice, 5003);
         var horongs = await UntilInRoom<DungeonService.SceneActorUnit>(instance, u => u.NpcId == 4360006, 2);

@@ -132,7 +132,7 @@ public sealed partial class TradeService
                     foreach (var id in list.Itemid)
                     {
                         int entry = Entry(id);
-                        var matches = rows.Where(l => l.Entry == entry && l.SpecialType == special && Visible(l, kind)).ToList();
+                        var matches = rows.Where(l => l.Entry == entry && (special == 0 || l.SpecialType == special) && Visible(l, kind)).ToList();
                         group.ItemInventoryInfos.Add(new ItemInventoryInfo
                         {
                             ItemId = id, ItemSpecialType = (ETradeItemSpecialType)special, IsPublicity = kind,
@@ -266,7 +266,7 @@ public sealed partial class TradeService
             UserRoleId = roleId.ToString(CultureInfo.InvariantCulture),
             UserCreditScore = state.CreditPoint, CreditScoreRatio = state.CreditScoreRatio,
             UserCreditScoreRate = state.CreditScoreRatio,
-            LowCreditScoreThreshold = (int)Public("TradeCreditMin", 0),
+            LowCreditScoreThreshold = (int)(Data.Config.PublicParams.Of(data).TradeCreditMin ?? 0),
         };
         await s.SendGameAsync(Credit, new CFindUserCreditScoreResponse { Data = info, QueryReason = req.QueryReason });
     }
