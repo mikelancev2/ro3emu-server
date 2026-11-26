@@ -156,7 +156,7 @@ public sealed class ProfessionTalentEffectTests : IAsyncDisposable
             Session.Tasks ??= new DBTaskInfo();
             Session.Tasks.CompleteTaskNum[10101170] = 1;
             Session.Tasks.CompleteTaskNum[10103160] = 1;
-            Session.SeasonTalent!.Plan[0].TalentNodes[1].CurrentLevel = 1;
+            Session.Season.SeasonTalent!.Plan[0].TalentNodes[1].CurrentLevel = 1;
             await _host.Service<SeasonTalentService>().SyncAsync(Session);
             return 0;
         });
@@ -225,28 +225,33 @@ public sealed class ProfessionTalentEffectTests : IAsyncDisposable
         await using var bot = await _host.InWorldAsync("Talent");
         var monster = await BlitzBeatHunter();
 
-        async Task<bool> FiresAt(int roll)
+        async Task<bool> FiresAt(int roll, bool expectHit)
         {
             int Hits() => bot.Inbox.Snapshot().Count(e => e.IsGame(CombatService.SkillHit) && SkillHitInfo.Parser.ParseFrom(e.Body).SkillId == AutoRow);
             int before = Hits();
             await BasicAttackAt(monster, roll);
-            await Task.Delay(100);
+            var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(expectHit ? 2000 : 150);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (Hits() > before) return true;
+                await Task.Delay(20);
+            }
             return Hits() > before;
         }
 
-        Assert.False(await FiresAt(0)); // no falcon
-        await OnLoop(() => { Session.CareerPendants = [Falcon]; return Task.FromResult(0); });
-        Assert.True(await FiresAt(2499));
-        Assert.False(await FiresAt(2500));
+        Assert.False(await FiresAt(0, expectHit: false)); // no falcon
+        await OnLoop(() => { Session.Profile.CareerPendants = [Falcon]; return Task.FromResult(0); });
+        Assert.True(await FiresAt(2499, expectHit: true));
+        Assert.False(await FiresAt(2500, expectHit: false));
 
-        await OnLoop(() => { Session.MountState.QuestMount = Wolf; return Task.FromResult(0); });
-        Assert.False(await FiresAt(0));
-        await OnLoop(() => { Session.MountState.QuestMount = 0; return Task.FromResult(0); });
+        await OnLoop(() => { Session.Profile.MountState.QuestMount = Wolf; return Task.FromResult(0); });
+        Assert.False(await FiresAt(0, expectHit: false));
+        await OnLoop(() => { Session.Profile.MountState.QuestMount = 0; return Task.FromResult(0); });
 
         Assert.Equal(0, await Request(bot, SeasonTalentService.Upgrade, new SeasonTalentUpgradeReq { TalentId = 4 },
             body => SeasonTalentUpgradeResp.Parser.ParseFrom(body).Result));
-        Assert.True(await FiresAt(3499));
-        Assert.False(await FiresAt(3500));
+        Assert.True(await FiresAt(3499, expectHit: true));
+        Assert.False(await FiresAt(3500, expectHit: false));
     }
 
     // The automatic proc is no cast: it tells its own timeline (31107, no cast action) and the 31101 of its hit belongs to
@@ -257,7 +262,7 @@ public sealed class ProfessionTalentEffectTests : IAsyncDisposable
         await Start();
         await using var bot = await _host.InWorldAsync("Talent");
         var monster = await BlitzBeatHunter();
-        await OnLoop(() => { Session.CareerPendants = [Falcon]; return Task.FromResult(0); });
+        await OnLoop(() => { Session.Profile.CareerPendants = [Falcon]; return Task.FromResult(0); });
 
         await BasicAttackAt(monster, 0);
         var timeline = UseInSkillInfo.Parser.ParseFrom((await bot.Inbox.WaitAsync(e => e.IsGame(CombatService.ExtraUseInSkillHigh)
@@ -278,7 +283,7 @@ public sealed class ProfessionTalentEffectTests : IAsyncDisposable
         s.Tasks ??= new DBTaskInfo();
         s.Tasks.CompleteTaskNum[10101170] = 1;
         s.Tasks.CompleteTaskNum[10103160] = 1;
-        s.SeasonTalent!.Plan[0].TalentNodes[1].CurrentLevel = 1;
+        s.Season.SeasonTalent!.Plan[0].TalentNodes[1].CurrentLevel = 1;
         await _host.Service<SeasonTalentService>().SyncAsync(s);
         var spawned = await _host.Service<MonsterService>().SpawnSingleAsync(s.SceneEntry, 16320001,
             new MapPoint(s.Position.X, s.Position.Y, s.Position.Z, 0), s.InstanceId);

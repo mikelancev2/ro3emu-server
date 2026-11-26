@@ -6,7 +6,7 @@ using Ro3Emu.Server.Economy;
 namespace Ro3Emu.Server.Accounts.Persistence;
 
 /// <summary>One connection and one dedicated thread. Admission accounts for both queued and executing plans.</summary>
-public sealed class DbWriter : IDisposable
+public sealed partial class DbWriter : IDisposable
 {
     public const int MaxDurableJobs = 1024, MaxDurableBytes = 4 * 1024 * 1024, MaxLazyBytes = 4 * 1024 * 1024;
     private const int MaxLazyJobs = 1024;
@@ -23,7 +23,7 @@ public sealed class DbWriter : IDisposable
     private int _durableJobs, _durableBytes, _lazyJobs, _lazyBytes;
     private bool _stopping, _lastWasOverdueLazy;
     private Exception? _terminalError;
-    /// <summary>C/D 19 fairness: a lazy job older than this alternates with durable work instead of waiting for an
+    /// <summary>Fairness limit: a lazy job older than this alternates with durable work instead of waiting for an
     /// idle writer, so sustained durable load cannot starve lazy parts (position/settings).</summary>
     internal TimeSpan LazyMaxWait { get; set; } = TimeSpan.FromSeconds(2);
 
@@ -44,7 +44,10 @@ public sealed class DbWriter : IDisposable
     public Task WorkerExited => _exited.Task;
     // Test-only deterministic barrier after SQL/revision work and before FULL commit.
     internal Action<string>? BeforeCommitForTest { get; set; }
+    internal Action? BeforeGroupCommitForTest { get; set; }
     internal Action<string>? AfterCommitForTest { get; set; }
+    /// <summary>Invoked when the writer enters terminal failure so the host can initiate clean shutdown.</summary>
+    internal Action<Exception>? TerminalFault { get; init; }
     /// <summary>Runs on this thread right after COMMIT with the role parts the plan declares (snapshot invalidation).</summary>
     internal Action<IReadOnlyList<RoleRevisionKey>>? RoleWritesCommitted { get; set; }
     internal bool StopRequested { get { lock (_gate) return _stopping; } }
@@ -145,11 +148,19 @@ public sealed class DbWriter : IDisposable
                 _durable.Clear(); _lazy.Clear();
                 _durableJobs = _durableBytes = _lazyJobs = _lazyBytes = 0;
             }
+            if (TerminalFault is { } onTerminal)
+            {
+                try { onTerminal(error); }
+                catch (Exception callbackError) { if (_log != null) LogTerminalFaultCallbackFailed(_log, callbackError); }
+            }
         }
         finally { _exited.TrySetResult(); }
     }
 
-    // Stage G group commit: jobs already queued behind the first one join its transaction, each inside its own
+    [LoggerMessage(Level = LogLevel.Error, Message = "Terminal writer fault callback failed")]
+    private static partial void LogTerminalFaultCallbackFailed(ILogger logger, Exception exception);
+
+    // Group commit: jobs already queued behind the first one join its transaction, each inside its own
     // savepoint (a failing job rolls back only itself), and one FULL commit makes the group durable. Every job's
     // completion is still released only after that commit, so durability and per-job outcomes are unchanged; jobs
     // execute in the same order as before, each seeing the earlier ones' writes. On the realm's disk a commit was
@@ -171,6 +182,7 @@ public sealed class DbWriter : IDisposable
     {
         var group = new List<Pending>();
         Exception? groupError = null;
+        bool commitFailed = false;
         long groupStarted = Stopwatch.GetTimestamp();
         SqliteTransaction? tx = null;
         try
@@ -195,7 +207,20 @@ public sealed class DbWriter : IDisposable
             {
                 int executed = group.Count(p => p.Executed);
                 if (executed == 0) tx.Rollback();
-                else { tx.Commit(); _metrics.WriterCommitted(executed); }
+                else
+                {
+                    try
+                    {
+                        BeforeGroupCommitForTest?.Invoke();
+                        tx.Commit();
+                    }
+                    catch (Exception commitError)
+                    {
+                        commitFailed = true;
+                        groupError = commitError;
+                    }
+                    if (groupError == null) _metrics.WriterCommitted(executed);
+                }
             }
         }
         catch (Exception e)
@@ -205,7 +230,12 @@ public sealed class DbWriter : IDisposable
         }
         finally { tx?.Dispose(); }
         foreach (var pending in group) Finish(db, pending, groupError);
+        if (groupError != null && (commitFailed || IsTerminalStorageError(groupError)))
+            throw groupError;
     }
+
+    private static bool IsTerminalStorageError(Exception error) =>
+        error is SqliteException { SqliteErrorCode: 8 or 10 or 11 or 13 or 14 or 26 } or IOException;
 
     /// <summary>One job inside the group's transaction. False when the transaction itself is lost (a failed
     /// savepoint rollback): the group then fails as a whole.</summary>
@@ -356,7 +386,8 @@ public sealed class DbWriter : IDisposable
                     string.Join(",", (_active is null ? Enumerable.Empty<DbPlan>() : [_active.Plan])
                         .Concat(_durable.Select(x => x.Plan)).Concat(_lazy.Select(x => x.Plan))
                         .Select(x => x.Label.Length > 64 ? x.Label[..64] : x.Label).Distinct().Take(8)));
-            _log?.LogError("Database writer shutdown timed out with durableJobs={DurableJobs}, durableBytes={DurableBytes}, lazyJobs={LazyJobs}, lazyBytes={LazyBytes}, labels={Labels}; worker retains its connection until accepted plans finish",
+            _log?.LogError("Database writer shutdown timed out with durableJobs={DurableJobs}, durableBytes={DurableBytes}, "
+                + "lazyJobs={LazyJobs}, lazyBytes={LazyBytes}, labels={Labels}; worker retains its connection until accepted plans finish",
                 debt.durableJobs, debt.durableBytes, debt.lazyJobs, debt.lazyBytes, debt.labels);
         }
     }

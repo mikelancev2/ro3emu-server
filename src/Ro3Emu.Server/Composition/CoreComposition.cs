@@ -16,12 +16,12 @@ internal static partial class CoreComposition
     public static void AddCoreInfrastructure(WebApplicationBuilder builder, ServerOptions options, TimeProvider? clock, HttpConnectionReaper httpConnections)
     {
         var services = builder.Services;
-        // Stage G: the default host on Windows also writes Warning and above to the Windows Event Log, synchronously on
+        // The default host on Windows also writes Warning and above to the Windows Event Log, synchronously on
         // the logging thread - the game loop included (a quarter of a walk's cost at 500 players). The console logger
         // queues to a background writer; the metrics provider registered below stays.
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole();
-        // One server per data dir (C/D 19): taken before anything opens the database, released when the app is disposed.
+        // One server per data dir: taken before anything opens the database, released when the app is disposed.
         services.AddSingleton(_ => RealmLock.Acquire(options.DataDir));
         services.AddSingleton(Options.Create(options));
         services.AddSingleton(clock ?? TimeProvider.System);
@@ -45,6 +45,8 @@ internal static partial class CoreComposition
             services.AddSingleton<ILoggerProvider>(sp => sp.GetRequiredService<Diagnostics.RecentLogBuffer>());
         services.AddSingleton<GameLoop>();
         services.AddSingleton<Deadlines>();
+        // Startup initializers run persisted state loads and migrations before tickers, loop, and gates open.
+        services.AddHostedService<RealmStartupService>();
         // Starts before the loop: by then the host has built every hosted service and, through them, every ticker.
         services.AddHostedService<GameLoopTickers>();
         services.AddHostedService(sp => sp.GetRequiredService<GameLoop>());
@@ -64,6 +66,7 @@ internal static partial class CoreComposition
         services.AddSingleton<World>();
         services.AddSingleton<WorldData>();
         services.AddSingleton<SceneService>();
+        services.AddSingleton<Game.Messaging.INpcInteractionHandler>(sp => sp.GetRequiredService<SceneService>());
         services.AddSingleton<WorldEffectsService>();
         services.AddSingleton<WorldCoreService>();
         services.AddSingleton<WorldCommonService>();
@@ -97,6 +100,8 @@ internal static partial class CoreComposition
         services.AddSingleton<Game.Messaging.IMessageModule, WorldMessages>();
         services.AddSingleton<Game.Messaging.IMessageModule, EconomyMessages>();
         services.AddSingleton<Game.Messaging.IMessageModule, CharacterMessages>();
+        services.AddSingleton<Game.Messaging.IMessageModule, CharacterGearMessages>();
+        services.AddSingleton<Game.Messaging.IMessageModule, CharacterCompanionMessages>();
         services.AddSingleton<Game.Messaging.IMessageModule, SocialMessages>();
         services.AddSingleton<Game.Messaging.IMessageModule, ActivitiesMessages>();
         services.AddSingleton<Game.Messaging.IMessageModule, AdventureGroupMessages>();
@@ -176,7 +181,10 @@ internal static partial class CoreComposition
     public static void WireWorld(WebApplication app)
     {
         app.Services.GetRequiredService<WorldEffectsService>(); // scene/monster effect hooks before clients connect
-        app.Services.GetRequiredService<WorldCoreService>();
+        app.Services.GetRequiredService<WorldCoreService>().WireWorldHooks(
+            app.Services.GetRequiredService<MonsterService>(),
+            app.Services.GetRequiredService<ChatService>(),
+            app.Services.GetRequiredService<MountService>());
         app.Services.GetRequiredService<WorldInteractionService>();
     }
 
@@ -194,6 +202,14 @@ internal static partial class CoreComposition
         var scene = app.Services.GetRequiredService<SceneService>();
         var world = app.Services.GetRequiredService<World>();
         var worldData = app.Services.GetRequiredService<WorldData>();
+        var worldCore = app.Services.GetRequiredService<WorldCoreService>();
+
+        gm.Register("line", "[n|new|info] (TEST AID)", scene.LineCommandAsync);
+        gm.Register("worldcustom", "id value", async (s, a) => await worldCore.SetCustomAsync(s, new Romsg.CustomData
+        { Id = long.Parse(a[0]), CustomParam = new Romsg.CustomParam { Tp = (Romsg.CustomParam.Types.ParamType)3, LongParam = long.Parse(a[1]) } }));
+        gm.Register("worldleave", "seconds", (s, a) => worldCore.BeginTemporaryLeaveAsync(s, int.Parse(a[0])));
+        gm.Register("scenevar", "id value", (s, a) => worldCore.SetSceneVariableAsync(s.WorldScene,
+            new Romsg.CommonPublicVar { VarId = int.Parse(a[0]), Vi64 = { long.Parse(a[1]) } }));
 
         // GmFlyToTarget [target id]: next to a player (role id), a monster or other world unit, or an NPC.
         gm.RegisterOp(GmCommands.OpFlyToTarget, async (s, args) =>
@@ -201,7 +217,7 @@ internal static partial class CoreComposition
             long uid = GmCommands.L(args[0]);
             if (uid == s.Role!.Id) return "That is you.";
             (RuntimeMapKey Map, long Scene, float X, float Y, float Z)? target = null;
-            if (sessions.All().FirstOrDefault(o => o.Role?.Id == uid) is { } player)
+            if (sessions.ByRole(uid) is { } player)
                 target = (player.RuntimeMap, player.SceneEntry, player.Position.X, player.Position.Y, player.Position.Z);
             else if (world.AllUnits().FirstOrDefault(u => u.Uid == uid) is { } unit)
                 target = (unit.RuntimeMap, unit.SceneEntry, unit.X, unit.Y, unit.Z);
@@ -314,6 +330,18 @@ internal static partial class CoreComposition
     [LoggerMessage(Level = LogLevel.Warning, Message = "!!! Ro3Emu:RefuseUnknownAccounts is on but the web panel's sign-up is " +
         "off: no new account can be created. Turn on Ro3Emu:Panel:Enabled and Ro3Emu:Panel:Registration (docs/guide/hosting.md).")]
     private static partial void LogNoSignUp(ILogger logger);
+}
+
+internal sealed class RealmStartupService(IEnumerable<IStartupInitializer> initializers) : IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        foreach (var initializer in initializers)
+            initializer.Initialize();
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
 /// <summary>

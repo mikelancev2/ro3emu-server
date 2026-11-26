@@ -14,16 +14,22 @@ internal static class ActivitiesComposition
         services.AddSingleton<TestingSwitches>();
         services.AddSingleton<ActivityClock>();
         services.AddSingleton<NewActivityService>();
+        services.AddSingleton<Game.Messaging.INpcInteractionHandler>(sp => sp.GetRequiredService<NewActivityService>());
+        services.AddSingleton<ActivityPassService>();
+        services.AddSingleton<AdventureActivityService>();
         services.AddSingleton<TimedEventService>();
         services.AddSingleton<TimedTodoSchedule>();
         services.AddSingleton<PronteraDefenseService>();
         services.AddSingleton<TimedBattleService>();
+        services.AddSingleton<Game.Messaging.INpcInteractionHandler>(sp => sp.GetRequiredService<TimedBattleService>());
         services.AddSingleton<ChickenBattleService>();
         services.AddSingleton<ChickenEncounterService>();
         services.AddSingleton<RiftBattleService>();
         services.AddSingleton<ICombatRule>(sp => sp.GetRequiredService<TimedBattleService>());
         services.AddSingleton<FestivalService>();
+        services.AddSingleton<IStartupInitializer>(sp => sp.GetRequiredService<FestivalService>());
         services.AddSingleton<RankRewardService>();
+        services.AddSingleton<IStartupInitializer>(sp => sp.GetRequiredService<RankRewardService>());
         services.AddSingleton<TrainingService>();
         services.AddSingleton<LotteryService>();
         services.AddSingleton<MvpService>();
@@ -48,14 +54,24 @@ internal static class ActivitiesComposition
     public static void WireActivities(WebApplication app)
     {
         app.Services.GetRequiredService<DailyActivityService>(); // quest settlement and online rollover
-        app.Services.GetRequiredService<NewActivityService>(); // activity clocks and reward state
+        DungeonComposition.WireDungeon(app); // keep DungeonService hooks ahead of LifeJobService
+        var activities = app.Services.GetRequiredService<NewActivityService>(); // activity clocks and reward state
+        var rewards = app.Services.GetRequiredService<RewardService>();
+        var life = app.Services.GetRequiredService<LifeJobService>();
+        rewards.ExplorationNotes = activities.NoteDrops;
+        rewards.SyncExplorationRestriction = life.SyncRestrictionsAsync;
+        activities.BindPass(app.Services.GetRequiredService<ActivityPassService>());
+        activities.BindAdventures(app.Services.GetRequiredService<AdventureActivityService>());
         app.Services.GetRequiredService<TimedEventService>();
         app.Services.GetRequiredService<PronteraDefenseService>();
         var timedBattles = app.Services.GetRequiredService<TimedBattleService>();
         timedBattles.BindChicken(app.Services.GetRequiredService<ChickenBattleService>());
         timedBattles.BindChickenEncounters(app.Services.GetRequiredService<ChickenEncounterService>());
         timedBattles.BindRift(app.Services.GetRequiredService<RiftBattleService>());
-        app.Services.GetRequiredService<CasualBattleService>();
+        app.Services.GetRequiredService<CasualBattleService>().WireBattleHooks(
+            app.Services.GetRequiredService<CombatService>(),
+            app.Services.GetRequiredService<PraiseService>(),
+            timedBattles);
         app.Services.GetRequiredService<FestivalService>();
         app.Services.GetRequiredService<TrainingService>();
     }
@@ -81,6 +97,10 @@ internal static class ActivitiesComposition
         var testing = app.Services.GetRequiredService<TestingSwitches>();
         var daily = app.Services.GetRequiredService<DailyActivityService>();
         var dungeons = app.Services.GetRequiredService<DungeonService>();
+        var casual = app.Services.GetRequiredService<CasualBattleService>();
+
+        gm.Register("casual", "open|close|start|at <s> (Mock Battle test aid: sign-ups outside the window, start the battle now"
+            + " (alone while open), jump the own match to <s> seconds after its start)", casual.GmAsync);
 
         gm.Register("rift", "| new | party [min] | <star 1-6> [boss name] (Rift Crisis test aid: status, new round, "
             + "smallest party, or a stone next to you)", rifts.RiftGmAsync);
@@ -130,7 +150,7 @@ internal static class ActivitiesComposition
             else if (args.Length != 0) throw new ArgumentException("alwaysopen on|off | unlimited on|off | reset");
             if (args.Length != 0)
             {
-                await RoleFanout.EachAsync(sessions.All().Where(p => p.Role != null && p.DailyReady), async p =>
+                await RoleFanout.EachAsync(sessions.All().Where(p => p.Role != null && p.Activities.DailyReady), async p =>
                 {
                     await daily.SyncEventsAsync(p);
                     await dungeons.SyncAsync(p);

@@ -13,14 +13,18 @@ internal static class CharacterComposition
             services.AddSingleton<IRoleLifecycle>(sp => sp.GetRequiredService<T>());
 
         services.AddSingleton<CharacterService>();
+        services.AddSingleton<CharacterInventoryService>();
+        services.AddSingleton<CharacterStatsService>();
         services.AddSingleton<SkillService>();
         services.AddSingleton<FunctionService>();
         services.AddSingleton<RewardService>();
         services.AddSingleton<TaskService>();
+        services.AddSingleton<TaskDomainService>();
         services.AddSingleton<AwardService>();
         services.AddSingleton<WildAfkService>();
         services.AddSingleton<LifeJobService>();
         services.AddSingleton<GatheringService>();
+        services.AddSingleton<Game.Messaging.INpcInteractionHandler>(sp => sp.GetRequiredService<GatheringService>());
         services.AddSingleton<GuideService>();
         services.AddSingleton<CardService>();
         services.AddSingleton<CardEffects>();
@@ -45,6 +49,7 @@ internal static class CharacterComposition
         services.AddSingleton<GrowthClassService>();
         services.AddSingleton<ParagonService>();
         services.AddSingleton<FlyingDragonService>();
+        services.AddSingleton<IStartupInitializer>(sp => sp.GetRequiredService<FlyingDragonService>());
         services.AddSingleton<TitleService>();
         services.AddSingleton<FirstHeartService>();
         services.AddSingleton<AppraisalService>();
@@ -88,6 +93,9 @@ internal static class CharacterComposition
         // Stats memoize across short tick windows on hot combat/ticker paths (CharacterService.Stats).
         var loop = app.Services.GetRequiredService<GameLoop>();
         var character = app.Services.GetRequiredService<CharacterService>();
+        character.BindSubsystems(
+            app.Services.GetRequiredService<CharacterInventoryService>(),
+            app.Services.GetRequiredService<CharacterStatsService>());
         character.WorkSerial = () => loop.WorkSerial;
         character.TickSerial = () => loop.TickSerial;
     }
@@ -95,7 +103,7 @@ internal static class CharacterComposition
     public static void WireCharacterHooks(WebApplication app)
     {
         app.Services.GetRequiredService<RewardService>();
-        app.Services.GetRequiredService<TaskService>(); // hooks kills / level / job changes
+        app.Services.GetRequiredService<TaskService>().BindDomains(app.Services.GetRequiredService<TaskDomainService>()); // hooks kills / level / job changes
     }
 
     public static void WireWildAfk(WebApplication app)

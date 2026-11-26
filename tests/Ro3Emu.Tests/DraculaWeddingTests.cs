@@ -165,7 +165,7 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
         await Next(bot, CombatService.SkillHit, SkillHitInfo.Parser, hit => hit.Dsts.Any(d => d.DstID == actor.Uid && d.IsDead));
     }
 
-    private static async Task<int> Interact(BotClient bot, DungeonService.SceneActorUnit actor, int interaction)
+    private static async Task<int> Interact(BotClient bot, SceneActorUnit actor, int interaction)
     {
         await bot.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionReq
         {
@@ -175,7 +175,7 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
             r => r.Req.NpcUid == actor.Uid && r.Req.InteractionId == interaction)).Result;
     }
 
-    private Task Beside(BotClient bot, DungeonService.SceneActorUnit actor) =>
+    private Task Beside(BotClient bot, SceneActorUnit actor) =>
         OnLoop(() => Service<SceneService>().TeleportInMapAsync(Session(bot), new MapPoint(actor.X + 1, actor.Y, actor.Z, 0)));
 
     private MailService.Mailbox Mailbox(long role) => Service<RoleStore>().LoadMailbox(role) is { Length: > 0 } blob
@@ -300,9 +300,9 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
         {
             await Beside(bob, bush);
             Assert.Equal(0, await Interact(bob, bush, (int)Service<DungeonCatalog>().Interactions(bush.NpcId)[0]));
-            if (await Read(() => Session(alice).DungeonAttempt!.Dracula!.Rescuer) != 0) break;
+            if (await Read(() => DraculaWeddingService.RunOf(Session(alice).DungeonAttempt)!.Rescuer) != 0) break;
         }
-        Assert.Equal(Id(bob), await Read(() => Session(alice).DungeonAttempt!.Dracula!.Rescuer));
+        Assert.Equal(Id(bob), await Read(() => DraculaWeddingService.RunOf(Session(alice).DungeonAttempt)!.Rescuer));
         var found = await Next(alice, DungeonService.Event, DungeonEventNotify.Parser, e => e.Vars.Any(v => v.VarId == 1302 && v.Vi64[0] != 0));
         Assert.Equal([Id(bob)], found.Vars.Single(v => v.VarId == 1302).Vi64);
         Assert.True(await Read(() => Session(bob).Buffs.Any(b => b.ConfigId == 4121301)), "the key buff");
@@ -401,6 +401,6 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
         await Next(bride, WorldCoreService.CustomChange, CustomDataChange.Parser, c => Camera(c, Id(guest)));
         await guest.SendGameAsync(TowerService.LeaveDungeon, new LeaveDungeonReq());
         await Next(bride, WorldCoreService.CustomChange, CustomDataChange.Parser, c => Camera(c, 0));
-        Assert.Equal(0, await Read(() => Session(bride).DungeonAttempt!.Dracula!.Watched));
+        Assert.Equal(0, await Read(() => DraculaWeddingService.RunOf(Session(bride).DungeonAttempt)!.Watched));
     }
 }

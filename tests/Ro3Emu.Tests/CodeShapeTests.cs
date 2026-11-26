@@ -14,24 +14,30 @@ public sealed class CodeShapeTests
     private const int MaxMethodLines = 80;
     private const int MaxGameMethodParams = 10;
     private const int ManyDependencies = 15;
+    private const int MaxClassDependencies = 20;
+    private const int MaxGameClassLines = 2500;
     private const int MaxLineLength = 200;
 
-    private const int MethodsOver80Lines = 94;
+    private const int MethodsOver80Lines = 66;
     private const int MethodsOver10ParamsInGame = 7;
-    private const int ClassesWith15OrMoreDependencies = 27;
-    private const int RoleNullForgiving = 961;
-    private const int LinesOver200Chars = 92;
+    private const int ClassesWith15OrMoreDependencies = 25;
+    private const int ClassesOver20Dependencies = 0;
+    private const int ClassesOver2500LinesInGame = 0;
+    private const int RoleNullForgiving = 958;
+    private const int LinesOver200Chars = 0;
     private const int ExposedHookLists = 0;
     private const int NumericIsOpenCalls = 0;
     private const int NumericStatIndexers = 0;
-    private const int NumericRouteMaps = 105;
-    private const int NumericSendGameCalls = 48;
+    private const int NumericRouteMaps = 0;
+    private const int PragmaCs1998InServer = 0;
+    private const int LinearRoleScansInServer = 0;
+    private const int NumericSendGameCalls = 0;
     private const int SystemClockCallsInGame = 0;
     private const int AdHocResetOffsetsInGame = 0;
     private const int PrivateRepoRootHelpersInTests = 0;
     private const int ServerHostCreateOutsideTestServer = 193;
     private const int ClearAllPoolsInTests = 61;
-    private const int TaskDelayCallsInTests = 534;
+    private const int TaskDelayCallsInTests = 533;
 
     private static readonly string ObjDir = Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar;
     private static readonly string BinDir = Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar;
@@ -56,6 +62,16 @@ public sealed class CodeShapeTests
             ServerSnapshot.Value.HeavyClasses);
 
     [Fact]
+    public void NoClassExceeds20Dependencies() =>
+        AssertRatchet(nameof(ClassesOver20Dependencies), ClassesOver20Dependencies,
+            ServerSnapshot.Value.OverloadedClasses);
+
+    [Fact]
+    public void NoGameClassExceeds2500Lines() =>
+        AssertRatchet(nameof(ClassesOver2500LinesInGame), ClassesOver2500LinesInGame,
+            ServerSnapshot.Value.OversizedGameClasses);
+
+    [Fact]
     public void RoleNullForgivingAccessesOnlyGoDown() =>
         AssertRatchet(nameof(RoleNullForgiving), RoleNullForgiving, ServerSnapshot.Value.RoleBangs);
 
@@ -78,6 +94,14 @@ public sealed class CodeShapeTests
     [Fact]
     public void NumericRouteMapsOnlyGoDown() =>
         AssertRatchet(nameof(NumericRouteMaps), NumericRouteMaps, ServerSnapshot.Value.NumericRouteMaps);
+
+    [Fact]
+    public void NoPragmaCs1998InServer() =>
+        AssertRatchet(nameof(PragmaCs1998InServer), PragmaCs1998InServer, ServerSnapshot.Value.PragmaCs1998);
+
+    [Fact]
+    public void NoLinearRoleScansInServer() =>
+        AssertRatchet(nameof(LinearRoleScansInServer), LinearRoleScansInServer, ServerSnapshot.Value.LinearRoleScans);
 
     [Fact]
     public void NumericSendGameCallsOnlyGoDown() =>
@@ -124,6 +148,61 @@ public sealed class CodeShapeTests
     }
 
     [Fact]
+    public void DungeonAttemptHasNoFeatureSpecificModeFields()
+    {
+        var members = typeof(Ro3Emu.Server.Game.DungeonService.Attempt)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.DoesNotContain(members, p => p.PropertyType == typeof(Ro3Emu.Server.Game.GuildChallengeService.Run)
+            || p.PropertyType == typeof(Ro3Emu.Server.Game.DraculaWeddingService.Run));
+    }
+
+    [Fact]
+    public void GameSessionPublicPropertiesStayWithinLimit()
+    {
+        int count = typeof(Ro3Emu.Server.Game.GameSession)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Length;
+        Assert.True(count <= 60, string.Create(CultureInfo.InvariantCulture,
+            $"GameSession grew to {count} public properties (limit 60). Move feature state to SessionSlot<T> or a domain state bag."));
+    }
+
+    [Fact]
+    public void NoLooseSourceFilesInGameRoot()
+    {
+        string gameRoot = Path.Combine(ClientData.RepoRoot, "src", "Ro3Emu.Server", "Game");
+        string[] loose = [.. Directory.EnumerateFiles(gameRoot, "*.cs", SearchOption.TopDirectoryOnly)
+            .Select(Path.GetFileName)
+            .OrderBy(n => n, StringComparer.Ordinal)!];
+        Assert.True(loose.Length == 0,
+            $"Found {loose.Length} loose .cs file(s) directly in src/Ro3Emu.Server/Game/: {string.Join(", ", loose.Take(10))}. Place new files in a domain subfolder.");
+    }
+
+    [Fact]
+    public void CoreLayersRespectGameBoundaries()
+    {
+        string serverRoot = Path.Combine(ClientData.RepoRoot, "src", "Ro3Emu.Server");
+        AssertLayerGameRefs(serverRoot, "Data", maxAllowed: 0);
+        AssertLayerGameRefs(serverRoot, "Net", maxAllowed: 0);
+        AssertLayerGameRefs(serverRoot, "Maps", maxAllowed: 6);
+        AssertLayerGameRefs(serverRoot, "Accounts", maxAllowed: 6);
+        AssertLayerGameRefs(serverRoot, "Economy", maxAllowed: 4);
+    }
+
+    private static void AssertLayerGameRefs(string serverRoot, string layer, int maxAllowed)
+    {
+        string layerRoot = Path.Combine(serverRoot, layer);
+        List<string> offending = [];
+        foreach (string path in Directory.EnumerateFiles(layerRoot, "*.cs", SearchOption.AllDirectories)
+            .OrderBy(p => p, StringComparer.Ordinal))
+        {
+            string text = File.ReadAllText(path);
+            if (text.Contains("Ro3Emu.Server.Game", StringComparison.Ordinal))
+                offending.Add(Path.GetRelativePath(serverRoot, path).Replace('\\', '/'));
+        }
+        AssertRatchet(layer + "FilesReferencingGame", maxAllowed, offending);
+    }
+
+    [Fact]
     public void ScannerDetectsEveryTrackedShapeViolation()
     {
         string body = string.Join('\n', Enumerable.Repeat("        x++;", 81));
@@ -148,6 +227,7 @@ public sealed class CodeShapeTests
                     var now = DateTime.UtcNow;
                     var ticks = Environment.TickCount64;
                     var gameDay = now.AddHours(-5).Date;
+                    var scanned = routes.All().FirstOrDefault(s => s.Role?.Id == x);
             {{body}}
                 }
                 public void TooWide(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11) { }
@@ -158,6 +238,8 @@ public sealed class CodeShapeTests
         Assert.Single(snapshot.LongMethods);
         Assert.Single(snapshot.WideGameMethods);
         Assert.Single(snapshot.HeavyClasses);
+        Assert.Empty(snapshot.OverloadedClasses);
+        Assert.Empty(snapshot.OversizedGameClasses);
         Assert.Single(snapshot.RoleBangs);
         Assert.Single(snapshot.LongLines);
         Assert.Equal(2, snapshot.HookLists.Count);
@@ -167,6 +249,7 @@ public sealed class CodeShapeTests
         Assert.Single(snapshot.NumericSendGame);
         Assert.Equal(2, snapshot.SystemClockCalls.Count);
         Assert.Single(snapshot.AdHocResetOffsets);
+        Assert.Single(snapshot.LinearRoleScans);
     }
 
     private static void AssertRatchet(string name, int ceiling, IReadOnlyList<string> items)
@@ -203,12 +286,15 @@ public sealed class CodeShapeTests
         List<string> longMethods = [];
         List<string> wideGameMethods = [];
         Dictionary<string, (int Params, string Location)> maxDepsByType = new(StringComparer.Ordinal);
+        Dictionary<string, (int Lines, int Files)> gameClassLines = new(StringComparer.Ordinal);
         List<string> roleBangs = [];
         List<string> longLines = [];
         List<string> hookLists = [];
         List<string> numericIsOpen = [];
         List<string> numericStatIndexers = [];
         List<string> numericRouteMaps = [];
+        List<string> pragmaCs1998 = [];
+        List<string> linearRoleScans = [];
         List<string> numericSendGame = [];
         List<string> systemClockCalls = [];
         List<string> adHocResetOffsets = [];
@@ -217,20 +303,23 @@ public sealed class CodeShapeTests
         {
             if (IsConfigTableView(relPath)) continue;
             CollectLongLines(relPath, text, longLines);
+            CollectPragmaCs1998(relPath, text, pragmaCs1998);
             var root = CSharpSyntaxTree.ParseText(text, path: relPath).GetRoot();
             bool inGame = relPath.StartsWith("Game/", StringComparison.Ordinal);
 
             CollectLongMethods(relPath, root, longMethods);
             if (inGame) CollectWideMethods(relPath, root, wideGameMethods);
             CollectHeavyTypes(relPath, root, maxDepsByType);
+            if (inGame) CollectGameClassLines(root, gameClassLines);
             CollectRoleBangs(relPath, root, roleBangs);
             if (inGame) CollectHookLists(relPath, root, hookLists);
             if (inGame) CollectNumericIsOpen(relPath, root, numericIsOpen);
             if (inGame) CollectNumericStatIndexers(relPath, root, numericStatIndexers);
             CollectNumericRouteMaps(relPath, root, numericRouteMaps);
+            CollectLinearRoleScans(relPath, root, linearRoleScans);
             CollectNumericSendGame(relPath, root, numericSendGame);
             if (inGame) CollectSystemClockCalls(relPath, root, systemClockCalls);
-            if (inGame && !string.Equals(relPath, "Game/GameCalendar.cs", StringComparison.Ordinal))
+            if (inGame && !string.Equals(relPath, "Game/Core/GameCalendar.cs", StringComparison.Ordinal))
                 CollectAdHocResetOffsets(relPath, root, adHocResetOffsets);
         }
 
@@ -244,12 +333,45 @@ public sealed class CodeShapeTests
                     "{0} ({1} deps) at {2}", kv.Key, kv.Value.Params, kv.Value.Location)),
         ];
 
-        return new(longMethods, wideGameMethods, heavyClasses, roleBangs, longLines, hookLists,
-            numericIsOpen, numericStatIndexers, numericRouteMaps, numericSendGame, systemClockCalls, adHocResetOffsets);
+        List<string> overloadedClasses =
+        [
+            .. maxDepsByType
+                .Where(kv => kv.Value.Params > MaxClassDependencies)
+                .OrderByDescending(kv => kv.Value.Params)
+                .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => string.Format(CultureInfo.InvariantCulture,
+                    "{0} ({1} deps) at {2}", kv.Key, kv.Value.Params, kv.Value.Location)),
+        ];
+
+        List<string> oversizedGameClasses =
+        [
+            .. gameClassLines
+                .Where(kv => kv.Value.Lines > MaxGameClassLines)
+                .OrderByDescending(kv => kv.Value.Lines)
+                .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => string.Format(CultureInfo.InvariantCulture,
+                    "{0} ({1} lines across {2} file(s))", kv.Key, kv.Value.Lines, kv.Value.Files)),
+        ];
+
+        return new(longMethods, wideGameMethods, heavyClasses, overloadedClasses, oversizedGameClasses,
+            roleBangs, longLines, hookLists, numericIsOpen, numericStatIndexers, numericRouteMaps, pragmaCs1998,
+            linearRoleScans, numericSendGame, systemClockCalls, adHocResetOffsets);
     }
 
     private static bool IsConfigTableView(string relPath) =>
         relPath.Replace('/', Path.DirectorySeparatorChar).StartsWith(ConfigTablesDir, StringComparison.Ordinal);
+
+    private static void CollectPragmaCs1998(string relPath, string text, List<string> target)
+    {
+        using var reader = new StringReader(text);
+        int lineNumber = 0;
+        while (reader.ReadLine() is { } line)
+        {
+            lineNumber++;
+            if (line.Contains("CS1998", StringComparison.Ordinal) && line.Contains("#pragma", StringComparison.Ordinal))
+                target.Add(string.Format(CultureInfo.InvariantCulture, "{0}:{1}", relPath, lineNumber));
+        }
+    }
 
     private static void CollectLongLines(string relPath, string text, List<string> target)
     {
@@ -316,6 +438,20 @@ public sealed class CodeShapeTests
             int line = type.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
             if (!maxDepsByType.TryGetValue(key, out var existing) || count > existing.Params)
                 maxDepsByType[key] = (count, string.Format(CultureInfo.InvariantCulture, "{0}:{1}", relPath, line));
+        }
+    }
+
+    private static void CollectGameClassLines(SyntaxNode root,
+        Dictionary<string, (int Lines, int Files)> gameClassLines)
+    {
+        foreach (var type in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
+        {
+            if (type.Parent is TypeDeclarationSyntax) continue;
+            var span = type.GetLocation().GetLineSpan();
+            int lines = span.EndLinePosition.Line - span.StartLinePosition.Line + 1;
+            string key = QualifiedTypeName(type);
+            gameClassLines.TryGetValue(key, out var existing);
+            gameClassLines[key] = (existing.Lines + lines, existing.Files + 1);
         }
     }
 
@@ -432,6 +568,25 @@ public sealed class CodeShapeTests
             if (args.Count < 2 || !IsNumericLiteral(args[0].Expression)) continue;
             int line = call.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
             target.Add(string.Format(CultureInfo.InvariantCulture, "{0}:{1} {2}", relPath, line, call.ToString()));
+        }
+    }
+
+    private static void CollectLinearRoleScans(string relPath, SyntaxNode root, List<string> target)
+    {
+        foreach (var call in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        {
+            if (call.Expression is not MemberAccessExpressionSyntax ma
+                || !string.Equals(ma.Name.Identifier.ValueText, "FirstOrDefault", StringComparison.Ordinal))
+                continue;
+            if (ma.Expression is not InvocationExpressionSyntax allCall
+                || allCall.Expression is not MemberAccessExpressionSyntax allMa
+                || !string.Equals(allMa.Name.Identifier.ValueText, "All", StringComparison.Ordinal))
+                continue;
+            if (call.ArgumentList.Arguments.Count != 1) continue;
+            string arg = call.ArgumentList.Arguments[0].ToString();
+            if (!arg.Contains(".Role?.Id ==", StringComparison.Ordinal)) continue;
+            int line = call.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+            target.Add(string.Format(CultureInfo.InvariantCulture, "{0}:{1}", relPath, line));
         }
     }
 
@@ -583,12 +738,16 @@ public sealed class CodeShapeTests
         IReadOnlyList<string> LongMethods,
         IReadOnlyList<string> WideGameMethods,
         IReadOnlyList<string> HeavyClasses,
+        IReadOnlyList<string> OverloadedClasses,
+        IReadOnlyList<string> OversizedGameClasses,
         IReadOnlyList<string> RoleBangs,
         IReadOnlyList<string> LongLines,
         IReadOnlyList<string> HookLists,
         IReadOnlyList<string> NumericIsOpen,
         IReadOnlyList<string> NumericStatIndexers,
         IReadOnlyList<string> NumericRouteMaps,
+        IReadOnlyList<string> PragmaCs1998,
+        IReadOnlyList<string> LinearRoleScans,
         IReadOnlyList<string> NumericSendGame,
         IReadOnlyList<string> SystemClockCalls,
         IReadOnlyList<string> AdHocResetOffsets);

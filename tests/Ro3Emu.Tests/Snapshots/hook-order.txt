@@ -69,7 +69,7 @@ CharacterService.ProgressHandlers (12)
 CharacterService.SpecialItemUse (5)
   WardrobeService.TryUseAppearanceItemAsync
   MountService.TryUseItemAsync
-  CharacterService.UseItemActionAsync
+  CharacterInventoryService.UseItemActionAsync
   PetService.TryUseSelfChooseAsync
   ItemBoxService.TryOpenAsync
 CharacterService.StateChanged (9)
@@ -99,7 +99,7 @@ CombatService.BeforeKilled (3)
 CombatService.BeforeLethalPublication (1)
   MvpService.PrepareKilledAsync
 CombatService.BossAreaLanded (1)
-  DungeonService.TrialBreakersAsync
+  RaidTrialsService.TrialBreakersAsync
 CombatService.CardHitReactions (1)
   CardEffects.ReflectAsync
 CombatService.CastLanded (4)
@@ -118,8 +118,8 @@ CombatService.CastResolved (7)
 CombatService.DamageAdjusters (10)
   PetCombatService.<WireGuardians> lambda
   PetCombatService.<WireGuardians> lambda
-  DungeonService.TrialDamage
-  DungeonService.<.ctor> lambda
+  RaidTrialsService.TrialDamage
+  RaidTrialsService.<WireCombat> lambda
   MvpService.<.ctor> lambda
   SiegeService.<.ctor> lambda
   TowerService.<RegisterSuppression> lambda
@@ -128,7 +128,7 @@ CombatService.DamageAdjusters (10)
   PassiveSkills.PreyOnTheWeakDamage
 CombatService.Dealt (5)
   TaskService.<.ctor> lambda
-  DungeonService.<.ctor> lambda
+  DungeonService.<BindSubsystems> lambda
   TimedBattleService.DragonDealt
   CasualBattleService.BossDealt
   GuildHuntingService.Dealt
@@ -136,14 +136,14 @@ CombatService.DealtAsync (8)
   PetCombatService.GuardianDamageReactionAsync
   PetCombatService.GuardianWindowMonsterHitAsync
   PetCombatService.<WireGuardians> lambda
-  DungeonService.TrialBossHitAsync
+  RaidTrialsService.TrialBossHitAsync
   TotemEffects.OnDealtAsync
   CardEffects.OnDealtAsync
   TalentProcs.RowProcsOnDealtAsync
   StealthEffects.<.ctor> lambda
 CombatService.EventDamageRecorded (7)
   MvpService.<.ctor> lambda
-  NewActivityService.OnTreasureMonsterDamagedAsync
+  AdventureActivityService.OnTreasureMonsterDamagedAsync
   TrainingService.<.ctor> lambda
   TerritoryWarsService.DamageRecordedAsync
   WarMachineService.MachineDamageRecordedAsync
@@ -156,30 +156,30 @@ CombatService.ExtraHitDamage (1)
 CombatService.GrantedSkill (6)
   CombatService.<.ctor> lambda
   MountService.<.ctor> lambda
-  DungeonService.FiresCannon
+  RaidTrialsService.FiresCannon
   CasualBattleService.<HookArena> lambda
   CasualBattleService.<HookArena> lambda
   WarMachineService.SeatSkill
 CombatService.Healed (3)
-  DungeonService.<.ctor> lambda
+  DungeonService.<BindSubsystems> lambda
   ChickenBattleService.ChickenHealed
-  CasualBattleService.<.ctor> lambda
+  CasualBattleService.<WireBattleHooks> lambda
 CombatService.HealedAsync (3)
   TerritoryWarsService.BattleHealRecordedAsync
   SiegeService.SiegeHealRecordedAsync
   GuildLeagueService.HealedAsync
 CombatService.IncomingDamageAdjusters (3)
-  DungeonService.<.ctor> lambda
+  RaidTrialsService.<WireCombat> lambda
   MvpService.<.ctor> lambda
   TotemEffects.AdjustIncomingDamageAsync
 CombatService.Killed (21)
   TaskService.OnKillAsync
   RewardService.KilledAsync
-  DungeonService.TrialObjectKilledAsync
+  RaidTrialsService.TrialObjectKilledAsync
   DungeonService.KilledAsync
   PronteraDefenseService.OnKilledAsync
   MvpService.OnKilledAsync
-  NewActivityService.OnTreasureMonsterKilledAsync
+  AdventureActivityService.OnTreasureMonsterKilledAsync
   RiftBattleService.OnePieceKilledAsync
   TimedBattleService.DragonBossKilledAsync
   CasualBattleService.MonsterKilledAsync
@@ -204,7 +204,7 @@ CombatService.PlayerDamageAdjusters (1)
   CardEffects.AdjustDamageTaken
 CombatService.PlayerDied (15)
   DungeonService.PlayerDiedAsync
-  NewActivityService.InterruptConchAsync
+  AdventureActivityService.InterruptConchAsync
   ChickenBattleService.ChickenDiedAsync
   RiftBattleService.OnePieceDiedAsync
   CasualBattleService.DiedAsync
@@ -242,13 +242,13 @@ CombatService.PvpDealtAsync (6)
 CombatService.PvpHitLanded (1)
   CardEffects.OnPvpHitAsync
 CombatService.ReviveInfoOwners (5)
-  DungeonService.<.ctor> lambda
+  DungeonService.<BindSubsystems> lambda
   ChickenBattleService.OwnsRevive
   CasualBattleService.<HookArena> lambda
   TerritoryWarsService.<.ctor> lambda
   GuildLeagueService.<HookBattle> lambda
 CombatService.Taken (2)
-  DungeonService.<.ctor> lambda
+  DungeonService.<BindSubsystems> lambda
   MvpService.OnTaken
 CombatService.TakenAsync (6)
   PetCombatService.<WireGuardians> lambda
@@ -331,7 +331,7 @@ PublicLineManager.Retiring (6)
   MvpService.RetireLineAsync
   MonsterService.RetireRuntimeAsync
   ChatService.RetireLineAsync
-  WorldCoreService.<.ctor> lambda
+  WorldCoreService.<WireWorldHooks> lambda
 RewardService.ExtraKillDrops (3)
   ParagonService.StarCoreDrops
   TitleService.CrestDrops
@@ -358,9 +358,9 @@ SceneService.Leaving (28)
   InstanceService.AbandonAsync
   WorldInteractionService.LeaveAsync
   DungeonService.AbandonAsync
-  DungeonService.StopSlideAsync
+  ScriptedDungeonService.StopSlideAsync
   LifeJobService.CancelAsync
-  NewActivityService.LeaveConchesAsync
+  AdventureActivityService.LeaveConchesAsync
   TimedBattleService.LeavingAsync
   CasualBattleService.LeavingAsync
   CasualBattleService.<HookArena> lambda
@@ -384,8 +384,8 @@ SceneService.LineSwitchChecks (1)
 SceneService.Loaded (25)
   DungeonService.LoadedAsync
   PronteraDefenseService.ApplyPrepBuffAsync
-  NewActivityService.OnTreasureSceneLoadedAsync
-  NewActivityService.ReloadConchesAsync
+  AdventureActivityService.OnTreasureSceneLoadedAsync
+  AdventureActivityService.ReloadConchesAsync
   TimedBattleService.LoadedAsync
   CasualBattleService.LoadedAsync
   FestivalService.LoadedAsync
@@ -414,7 +414,7 @@ SceneService.PublicLineOpened (2)
   MvpService.ActivateLine
   StallsService.ActivateLine
 SceneService.Resync (2)
-  NewActivityService.ReloadConchesAsync
+  AdventureActivityService.ReloadConchesAsync
   WorldEffectsService.ReplayAsync
 SeasonService.ScheduleChanged (1)
   NewActivityService.InvalidateAllSchedules
@@ -434,7 +434,7 @@ TaskService.ExtraTasks (1)
 TaskService.GuildActivityJoined (0)
 TaskService.QuestDelivered (5)
   TaskService.AddFactionPoints
-  NewActivityService.OnExplorationQuestDelivered
+  AdventureActivityService.OnExplorationQuestDelivered
   AdventureGroupService.OnTaskDelivered
   SocialComposition.AchievementTaskDelivered
   TaskService.OnConnectDelivered

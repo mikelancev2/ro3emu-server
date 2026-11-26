@@ -29,6 +29,7 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
     internal const int MaxRolesPerBatch = 50;
 
     public string Name => "UserDataService";
+    public MicroAdmission Admission => MicroAdmission.SelfManaged;
 
     public async ValueTask<object?> InvokeAsync(MicroSession session, string method, object? args) =>
         method == "getAttributeBatchByVersion" ? await loop.InvokeAsync(() => GetAttributesAsync(args)) : null;
@@ -115,7 +116,7 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
     private Dictionary<string, object?> Entry(Accounts.Persistence.ProfileSnapshot profile, IReadOnlySet<string> asked)
     {
         var role = profile.Role;
-        var session = sessions.All().FirstOrDefault(s => s.Role?.Id == role.Id);
+        var session = sessions.ByRole(role.Id);
         var live = session?.Progress;
         var guild = profile.Guild;
         var member = guild?.Members.GetValueOrDefault(role.Id);
@@ -128,20 +129,20 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
             GuildID = guild?.Id ?? 0, GuildOfficial = member?.Official ?? 0,
             CantBeInvited = personal?.CantBeInvited ?? false, Offlinetime = offline,
         };
-        additional.Appearances.Add(session?.Wardrobe?.CurUseAppearances.ToDictionary(p => p.Key, p => p.Value)
+        additional.Appearances.Add(session?.Profile.Wardrobe?.CurUseAppearances.ToDictionary(p => p.Key, p => p.Value)
             ?? RoleProto.Appearances(role, profile.Wardrobe));
         // The card's "Fashion" (UI_Sys_Personal_InfoWidgetCtrl._refreshPlayerBaseInfoShow reads Base.fashionScore).
-        additional.FashionScore = (int)Math.Min(int.MaxValue, WardrobeService.FashionScore(data, session?.Wardrobe
+        additional.FashionScore = (int)Math.Min(int.MaxValue, WardrobeService.FashionScore(data, session?.Profile.Wardrobe
             ?? (profile.Wardrobe is { Length: > 0 } wardrobe ? DBWardRobeInfo.Parser.ParseFrom(wardrobe) : null)));
         // The profile card's current preset: Base carries its avatar, frame and title (inferred mirror of PersonalInfo).
-        var card = personalCards.PublicCard(session?.Personal
+        var card = personalCards.PublicCard(session?.Social.Personal
             ?? (profile.Personal is { Length: > 0 } stored ? DBPersonalInfo.Parser.ParseFrom(stored) : null));
         additional.AvatarId = card.AvatarId;
         additional.AvatarFrameId = card.AvatarFrameId;
         additional.PersonalTitleId = card.PersonalTitleId;
         // The worn chat cosmetics (slot type to outfit): other players' chat bubble, honor, overhead title and profile card
         // index them unguarded (UI_Sys_Chat_BgWidgetCtrl, UI_Sys_Personal_InfoWidgetCtrl), so the defaults are sent too.
-        additional.SocialOutfitData = SocialOutfitService.Worn(data, role.Sex, live?.Career ?? role.Career, session?.SocialOutfit
+        additional.SocialOutfitData = SocialOutfitService.Worn(data, role.Sex, live?.Career ?? role.Career, session?.Social.SocialOutfit
             ?? (profile.SocialOutfit is { Length: > 0 } outfits ? DBSocialOutfit.Parser.ParseFrom(outfits) : null),
             clock.GetUtcNow().ToUnixTimeSeconds());
         var fields = new Dictionary<string, object?>

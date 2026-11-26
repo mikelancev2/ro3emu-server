@@ -71,6 +71,58 @@ public sealed class SessionIdentityTests
     }
 
     [Fact]
+    public async Task ByRoleAndByAccountTrackLiveSessionsInConstantTime()
+    {
+        var registry = Registry();
+        var session = Game();
+        var role = RoleOf("alice");
+        await registry.SignInAsync(session, "alice", register: true);
+        Assert.Same(session, registry.ByAccount("alice"));
+        Assert.Null(registry.ByAccount("bob"));
+        Assert.Null(registry.ByRole(role.Id));
+
+        session.Role = role;
+        Assert.Same(session, registry.ByRole(role.Id));
+
+        session.Role = null;
+        Assert.Null(registry.ByRole(role.Id));
+
+        session.Role = role;
+        registry.Unregister(session);
+        Assert.Null(registry.ByRole(role.Id));
+        Assert.Null(registry.ByAccount("alice"));
+    }
+
+    [Fact]
+    public async Task BroadcastSkipsNonMatchingSessions()
+    {
+        var registry = Registry();
+        var session = Game();
+        await registry.SignInAsync(session, "alice", register: true);
+
+        // No matching sessions: returns cleanly without touching Channel.
+        await registry.BroadcastAsync(30001, new Phonest.Proto.DisconnectClientInfo(), _ => false);
+    }
+
+    [Fact]
+    public void SessionSlotStoresAndClearsRoleScopedState()
+    {
+        var roleSlot = new SessionSlot<List<int>>(clearOnRoleReset: true);
+        var connSlot = new SessionSlot<List<string>>(clearOnRoleReset: false);
+        var session = Game();
+
+        Assert.Null(session.GetSlot(roleSlot));
+        session.GetOrCreateSlot(roleSlot).Add(42);
+        session.GetOrCreateSlot(connSlot).Add("keep");
+        Assert.Equal([42], session.GetSlot(roleSlot));
+        Assert.Equal(["keep"], session.GetSlot(connSlot));
+
+        session.ClearRoleLoadState();
+        Assert.Null(session.GetSlot(roleSlot));
+        Assert.Equal(["keep"], session.GetSlot(connSlot));
+    }
+
+    [Fact]
     public void AMicroConnectionThatChangesAccountStopsReceivingTheFirstOnesPushes()
     {
         var micro = new MicroSessions(NullLogger<MicroSessions>.Instance);

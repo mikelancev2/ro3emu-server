@@ -17,7 +17,9 @@ internal static class GuildComposition
         services.AddSingleton<GuildStore>();
         services.AddSingleton<GuildHomeService>();
         services.AddSingleton<GuildCampfireService>();
+        services.AddSingleton<Game.Messaging.INpcInteractionHandler>(sp => sp.GetRequiredService<GuildCampfireService>());
         services.AddSingleton<GuildHuntingService>();
+        services.AddSingleton<IStartupInitializer>(sp => sp.GetRequiredService<GuildHuntingService>());
         services.AddSingleton<GuildChallengeStore>();
         services.AddSingleton<GuildChallengeService>();
         services.AddSingleton<DraculaWeddingService>();
@@ -29,6 +31,7 @@ internal static class GuildComposition
         services.AddSingleton<GuildCaravanService>();
         services.AddSingleton<GuildLeagueCalendar>();
         services.AddSingleton<GuildLeagueService>();
+        services.AddSingleton<IStartupInitializer>(sp => sp.GetRequiredService<GuildLeagueService>());
         services.AddSingleton<ICombatRule>(sp => sp.GetRequiredService<GuildLeagueService>());
 
         AddLifecycle<GuildService>();
@@ -97,6 +100,10 @@ internal static class GuildComposition
         var guildService = app.Services.GetRequiredService<GuildService>();
         var challenge = app.Services.GetRequiredService<GuildChallengeService>();
         var hunting = app.Services.GetRequiredService<GuildHuntingService>();
+        var league = app.Services.GetRequiredService<GuildLeagueService>();
+
+        gm.Register("league", "register | fill | status (Guild League test aid: register the current or next tournament now; "
+            + "fill your guild's elite roster now; show it)", league.GmAsync);
 
         gm.Register("guildchallenge", "open|close (test aid)", async (s, a) =>
         {
