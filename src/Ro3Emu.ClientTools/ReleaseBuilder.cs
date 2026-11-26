@@ -27,7 +27,7 @@ public static class ReleaseBuilder
     private static bool IsMutableAtRuntime(string relative) =>
         Array.Exists(MutableAtRuntime, p => string.Equals(p, relative, StringComparison.OrdinalIgnoreCase));
 
-    public static async Task<int> PublishAsync(string clientDir, string serverUrl, string pem, string repoDir, string version, string channel, int compression)
+    public static async Task<int> PublishAsync(string clientDir, string serverUrl, string pem, string repoDir, string version, string channel, int compression, string? signingKeyPem = null, bool allowUnsigned = false)
     {
         clientDir = Path.GetFullPath(clientDir);
         var baseline = ReadBaseline(clientDir);
@@ -84,6 +84,8 @@ public static class ReleaseBuilder
             Channel = channel,
             LaunchExe = "ro3.exe",
             CompressionLevel = compression,
+            SigningKeyPem = signingKeyPem,
+            AllowUnsigned = allowUnsigned,
         }, progress);
         Console.WriteLine($"done: {result.NewChunks} new chunks ({result.NewStoredBytes / 1048576} MiB stored), {result.ReusedChunks} reused");
         Directory.Delete(staging, recursive: true);
